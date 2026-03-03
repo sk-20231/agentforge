@@ -1,0 +1,5 @@
+# Development / testing dependencies
+pytest>=7.0.0
+
+# Optional: load .env from project root (config.py will use it if installed)
+# python-dotenv>=1.0.0

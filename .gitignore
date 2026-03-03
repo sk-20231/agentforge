@@ -1,0 +1,31 @@
+# Environment and secrets
+.env
+.env.local
+*.env
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Test and tooling
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Agent runtime data — generated at runtime, not part of source
+agent_logs.jsonl
+corpus.json
+memory.json
+memory/
+
+# IDE and tooling
+.cursor/

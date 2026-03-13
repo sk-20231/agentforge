@@ -136,9 +136,11 @@ def run_agent(
 
     # -------------------------------
     # DOCS_QA (RAG — answer from ingested documents)
+    # When stream=True, answer_from_docs returns an Iterator[str] (generator).
+    # Steps 1-3 (rewrite, retrieve, prompt) are synchronous; only generation streams.
     # -------------------------------
     if intent == "DOCS_QA":
-        return answer_from_docs(user_input, history=safe_history)
+        return answer_from_docs(user_input, history=safe_history, stream=stream)
 
     # -------------------------------
     # ANSWER / MEMORY-AWARE

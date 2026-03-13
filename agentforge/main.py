@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
 from openai import OpenAI
 import json
 
@@ -19,14 +22,37 @@ client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
 
 
 def simple_llm_answer(user_input: str) -> str:
+    """Non-streaming LLM call. Returns the full response as a single string."""
     response = client.chat.completions.create(
         model=OPENAI_MODEL,
-        messages=[
-            {"role": "user", "content": user_input}
-        ]
+        messages=[{"role": "user", "content": user_input}],
     )
-
     return response.choices[0].message.content
+
+
+def stream_llm_answer(user_input: str) -> Iterator[str]:
+    """Stream a basic LLM response token by token.
+
+    Uses stream=True so the API returns one ChatCompletionChunk per token
+    instead of waiting for the full response. This function is a Python
+    generator — callers iterate over it with `for token in stream_llm_answer(...)`.
+
+    Each chunk's delta.content is one token (or None on the final sentinel
+    chunk, which we skip with the `if token` guard).
+    """
+    response = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[{"role": "user", "content": user_input}],
+        stream=True,
+    )
+    token_count = 0
+    for chunk in response:
+        token = chunk.choices[0].delta.content
+        if token:
+            token_count += 1
+            yield token
+    import logging
+    logging.getLogger(__name__).debug("stream_llm_answer: yielded %d tokens.", token_count)
 
 
 def run_react_agent(user_id: str, user_input: str, max_steps: int = 5) -> str:
@@ -36,7 +62,13 @@ def run_react_agent(user_id: str, user_input: str, max_steps: int = 5) -> str:
 VALID_INTENTS = frozenset({"REMEMBER", "ACT", "REACT", "ANSWER", "IGNORE", "RESPOND_WITH_MEMORY", "DOCS_QA"})
 
 
-def run_agent(user_id: str, session_id: str, user_input: str, history: list[dict] = None) -> str:
+def run_agent(
+    user_id: str,
+    session_id: str,
+    user_input: str,
+    history: list[dict] = None,
+    stream: bool = False,
+) -> str | Iterator[str]:
     # Trim history to the configured token budget before any LLM call.
     # We trim here — once, at the entry point — so every pipeline (ANSWER,
     # DOCS_QA, etc.) automatically receives a history that fits the budget.
@@ -110,9 +142,11 @@ def run_agent(user_id: str, session_id: str, user_input: str, history: list[dict
 
     # -------------------------------
     # ANSWER / MEMORY-AWARE
+    # When stream=True, answer_with_memory returns an Iterator[str] (generator).
+    # When stream=False (default), it returns str — fully backward compatible.
     # -------------------------------
     if intent in ("ANSWER", "RESPOND_WITH_MEMORY"):
-        return answer_with_memory(user_id, user_input, history=safe_history)
+        return answer_with_memory(user_id, user_input, history=safe_history, stream=stream)
 
     # -------------------------------
     # IGNORE
@@ -219,9 +253,20 @@ if __name__ == "__main__":
 
         try:
             log_event("user_input", {"text": user_input})
-            result = run_agent(user_id, session_id, user_input, history=history)
-            log_event("final_answer", {"text": result})
-            print("Agent:", result)
+            result = run_agent(user_id, session_id, user_input, history=history, stream=True)
+
+            if isinstance(result, str):
+                log_event("final_answer", {"text": result, "streamed": False})
+                print("Agent:", result)
+            else:
+                print("Agent: ", end="", flush=True)
+                full_text = ""
+                for token in result:
+                    print(token, end="", flush=True)
+                    full_text += token
+                print()
+                result = full_text
+                log_event("final_answer", {"text": result, "streamed": True})
 
             history.append({"role": "user", "content": user_input})
             history.append({"role": "assistant", "content": result})

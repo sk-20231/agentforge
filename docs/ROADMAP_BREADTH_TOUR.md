@@ -15,7 +15,7 @@ Same rules as before: pick a step, study it, ask questions, learn, then move to 
 | 1 | Conversation history | ✅ Done |
 | 2 | Token budget and truncation | ✅ Done |
 | 3 | Query rewriting (conversation-aware RAG) | ✅ Done |
-| 4 | Stream basic LLM response | ⬜ Pending |
+| 4 | Stream basic LLM response | ✅ Done |
 | 5 | Stream the RAG answer | ⬜ Pending |
 | 6 | Structured output for intent classification | ⬜ Pending |
 | 7 | Structured output for ReAct engine | ⬜ Pending |

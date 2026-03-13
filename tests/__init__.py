@@ -1,1 +1,1 @@
-# Tests for simple-agent
+# Tests for agentforge

@@ -1,5 +1,5 @@
 """
-Pytest fixtures for simple-agent tests.
+Pytest fixtures for agentforge tests.
 Use a temporary directory for memory so tests don't touch real user data.
 """
 import os

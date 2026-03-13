@@ -171,7 +171,12 @@ def run_llm_with_tools(user_id: str, user_input: str) -> str:
             model=OPENAI_MODEL,
             messages=build_messages(user_id, user_input),
             tools=TOOLS_SCHEMA,
-            tool_choice="auto"
+            # "required" forces the model to call a tool even for trivially simple
+            # expressions like 4*3 that it could compute mentally. Without this,
+            # the model skips the tool, returns JSON with action.type="tool" and
+            # reply="" (because OUTPUT_SCHEMA says reply must be empty when type
+            # is tool), and the agent shows a blank response.
+            tool_choice="required",
         )
     except Exception as e:
         return json.dumps({
@@ -215,7 +220,20 @@ def run_llm_with_tools(user_id: str, user_input: str) -> str:
                         "role": "assistant",
                         "tool_calls": message.tool_calls
                     },
-                    *tool_messages
+                    *tool_messages,
+                    # Explicit finalise instruction: the model now has the tool
+                    # result and must produce a final JSON reply, not another
+                    # tool call. Without this, it sometimes returns reply: ""
+                    # thinking another step is needed.
+                    {
+                        "role": "system",
+                        "content": (
+                            "You have received the tool result above. "
+                            "Now produce your FINAL response. "
+                            "Set action.type to 'final', write the answer to the user "
+                            "in the 'reply' field, and do NOT call any more tools."
+                        ),
+                    },
                 ]
             )
             return followup.choices[0].message.content

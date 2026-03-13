@@ -85,7 +85,12 @@ def run_agent(
         intent_data = classify_intent(user_input)
     except Exception:
         return "Something went wrong while understanding your request. Please try again."
-    log_event("intent_classification", {"intent": intent_data["intent"], "memory_candidate": intent_data["memory_candidate"], "reason": intent_data["reason"]})
+    log_event("intent_classification", {
+        "intent": intent_data["intent"],
+        "memory_candidate": intent_data["memory_candidate"],
+        "reason": intent_data["reason"],
+        "structured_output": True,
+    })
 
     intent = intent_data["intent"]
     memory_candidate = intent_data["memory_candidate"]
@@ -161,6 +166,10 @@ def run_agent(
 # -------------------------------
 
 def classify_intent(user_input: str) -> dict:
+    # Prompt no longer needs "return ONLY valid JSON" instructions —
+    # response_format={"type": "json_object"} enforces that at the API level.
+    # The prompt still describes the expected keys and value constraints because
+    # structured output guarantees valid JSON but NOT the right shape or values.
     prompt = f"""
 You are an intent classifier for an AI agent.
 
@@ -191,24 +200,24 @@ Examples NOT to save:
 - I am tired today
 - I want pizza right now
 
-Return ONLY valid JSON with memory_candidate as a STRING (not an object).
-
 User input:
 "{user_input}"
 
-JSON:
-{{
-  "intent": "",
-  "memory_candidate": "<plain text string or empty string>",
-  "reason": ""
-}}
+Respond with a JSON object with exactly these keys:
+  "intent"           — one of the intent labels above
+  "memory_candidate" — plain text string, or empty string if nothing to save
+  "reason"           — one sentence explaining the classification
 """
-
 
     try:
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
+            # Constrained decoding: the API enforces valid JSON at the token level.
+            # json.loads will never throw a JSONDecodeError on this response.
+            # Key/value validation still happens below — response_format only
+            # guarantees structure, not the correct keys or intent values.
+            response_format={"type": "json_object"},
         )
         raw = response.choices[0].message.content
         if not raw or not raw.strip():

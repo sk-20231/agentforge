@@ -17,7 +17,7 @@ Same rules as before: pick a step, study it, ask questions, learn, then move to 
 | 3 | Query rewriting (conversation-aware RAG) | ✅ Done |
 | 4 | Stream basic LLM response | ✅ Done |
 | 5 | Stream the RAG answer | ✅ Done |
-| 6 | Structured output for intent classification | ⬜ Pending |
+| 6 | Structured output for intent classification | ✅ Done |
 | 7 | Structured output for ReAct engine | ⬜ Pending |
 | 8 | Create evaluation dataset | ⬜ Pending |
 | 9 | Measure retrieval quality (Recall@K) | ⬜ Pending |

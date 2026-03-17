@@ -1,10 +1,10 @@
 """
-Unit tests for agent.tools: calculator and execute_tool.
+Unit tests for agent.tools: calculator, execute_tool, and leading-zero handling.
 """
 import pytest
 from unittest.mock import patch
 
-from agentforge.tools import calculator, execute_tool, TOOL_REGISTRY
+from agentforge.tools import calculator, execute_tool, TOOL_REGISTRY, _strip_leading_zeros, safe_eval_math
 
 
 class TestCalculator:
@@ -30,6 +30,47 @@ class TestCalculator:
         # eval with restricted builtins should reject things like __import__
         result = calculator("__import__('os').system('echo')")
         assert "Error" in result
+
+
+class TestStripLeadingZeros:
+    """Tests for _strip_leading_zeros — normalises LLM-generated expressions."""
+
+    def test_single_leading_zero(self):
+        assert _strip_leading_zeros("0765") == "765"
+
+    def test_multiple_leading_zeros(self):
+        assert _strip_leading_zeros("007") == "7"
+
+    def test_zero_itself_preserved(self):
+        assert _strip_leading_zeros("0") == "0"
+
+    def test_no_leading_zeros(self):
+        assert _strip_leading_zeros("123 * 456") == "123 * 456"
+
+    def test_mixed_expression(self):
+        assert _strip_leading_zeros("0765 * 5243") == "765 * 5243"
+
+    def test_both_operands_have_leading_zeros(self):
+        assert _strip_leading_zeros("0012 + 0034") == "12 + 34"
+
+    def test_decimal_preserved(self):
+        assert _strip_leading_zeros("0.5 * 2") == "0.5 * 2"
+
+    def test_empty_string(self):
+        assert _strip_leading_zeros("") == ""
+
+
+class TestCalculatorLeadingZeros:
+    """Tests that calculator handles leading-zero expressions (the actual bug)."""
+
+    def test_leading_zero_multiplication(self):
+        assert calculator("0765 * 5243") == str(765 * 5243)
+
+    def test_leading_zero_addition(self):
+        assert calculator("007 + 003") == "10"
+
+    def test_leading_zero_large_number(self):
+        assert calculator("00100 * 00200") == "20000"
 
 
 class TestExecuteTool:

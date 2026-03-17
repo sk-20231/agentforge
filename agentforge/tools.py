@@ -1,6 +1,8 @@
 # agent/tools.py
 import ast
 import json
+import logging
+import re
 from openai import OpenAI
 from typing import Dict, Callable, Any, Union
 
@@ -8,6 +10,8 @@ from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
 from agentforge.prompts import SYSTEM_PROMPT, MEMORY_INSTRUCTIONS, OUTPUT_SCHEMA
 from agentforge.memory.semantic import get_relevant_memories
 from agentforge.logger import log_event
+
+logger = logging.getLogger(__name__)
 
 client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
 
@@ -70,12 +74,23 @@ def _safe_eval_node(node: ast.AST) -> Union[int, float]:
     raise ValueError(f"Unsupported expression type: {type(node).__name__}")
 
 
+def _strip_leading_zeros(expression: str) -> str:
+    """Remove leading zeros from integer literals so ast.parse doesn't reject them.
+
+    Python 3 treats '0765' as invalid syntax (Python 2 octal). Users typing
+    '0765 * 5243' mean 765, not octal. This regex finds sequences of digits
+    with leading zeros and normalises them (e.g. '0765' → '765', '007' → '7'),
+    while preserving '0' itself and decimal numbers like '0.5'.
+    """
+    return re.sub(r'\b0+(\d+)', r'\1', expression)
+
+
 def safe_eval_math(expression: str) -> Union[int, float]:
     """
     Safely evaluate a math expression. Allows numbers, +, -, *, /, //, %, **,
     parentheses, and abs(), round(), min(), max(). No builtins or attribute access.
     """
-    expr = expression.strip()
+    expr = _strip_leading_zeros(expression.strip())
     if not expr:
         raise ValueError("Empty expression")
     tree = ast.parse(expr, mode="eval")
@@ -89,7 +104,7 @@ def safe_eval_math(expression: str) -> Union[int, float]:
 
 def calculator(expression: str) -> str:
     """Safely evaluate a math expression (no eval of arbitrary code)."""
-    print("🧮 Calculator tool invoked with expression:", expression)
+    logger.info("Calculator tool invoked with expression: %s", expression)
     try:
         if not expression or not isinstance(expression, str):
             return "Error: expression must be a non-empty string"

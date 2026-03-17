@@ -5,7 +5,7 @@ import logging
 from openai import OpenAI
 
 from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
-from agentforge.prompts import build_prompt, OUTPUT_SCHEMA
+from agentforge.prompts import build_prompt, OUTPUT_SCHEMA, SYSTEM_PROMPT, MEMORY_INSTRUCTIONS
 from agentforge.tools import execute_tool
 from agentforge.memory.semantic import get_relevant_memories, store_memory
 from agentforge.logger import log_event
@@ -31,6 +31,7 @@ def react_loop(user_id: str, user_input: str, max_steps: int = 5) -> str:
 
     memory_chunks = get_relevant_memories(user_id, user_input)
     messages = build_prompt(user_input, memory_chunks)
+    messages.append({"role": "system", "content": OUTPUT_SCHEMA})
     log_event("react_start", {"user_input": user_input, "max_steps": max_steps})
 
     for step in range(max_steps):
@@ -45,7 +46,8 @@ def react_loop(user_id: str, user_input: str, max_steps: int = 5) -> str:
                 response_format={"type": "json_object"},
             )
             raw = response.choices[0].message.content
-        except Exception:
+        except Exception as e:
+            logger.error("react_loop: LLM call failed on step %d: %s", step + 1, e, exc_info=True)
             return "I ran into an error during planning. Please try again."
 
         try:

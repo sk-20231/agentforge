@@ -3,7 +3,7 @@ Evaluation utilities for measuring RAG quality.
 
 Step 8: Dataset loader and validator.
 Step 9: recall_at_k (retrieval quality).
-Step 10 will add: faithfulness scoring (answer quality).
+Step 10: faithfulness scoring (answer quality via LLM-as-judge).
 """
 import json
 import logging
@@ -187,6 +187,168 @@ def run_retrieval_eval(
     }
 
 
+# ---------------------------------------------------------------------------
+# Step 10 — Answer faithfulness (LLM-as-judge)
+# ---------------------------------------------------------------------------
+
+FAITHFULNESS_JUDGE_PROMPT = """\
+You are an impartial judge evaluating whether an AI assistant's answer is \
+faithful to the provided source chunks.
+
+"Faithful" means the answer ONLY contains information that is supported by \
+the chunks. It does NOT add facts, numbers, names, or claims that cannot be \
+found in the chunks.
+
+You will receive:
+- The user's QUESTION
+- The CHUNKS that were given to the assistant
+- The assistant's ANSWER
+
+Respond in JSON with exactly two fields:
+{
+  "faithful": true or false,
+  "reason": "one-sentence explanation of your verdict"
+}
+
+Rules:
+- If every claim in the answer can be traced to at least one chunk, it is faithful.
+- Minor rephrasing or summarising is fine — that is still faithful.
+- If the answer says "I don't have enough information", that is faithful.
+- If the answer adds ANY fact not present in any chunk, it is NOT faithful.
+"""
+
+
+def score_faithfulness(
+    question: str,
+    answer: str,
+    chunks: list[dict],
+) -> dict:
+    """Use an LLM to judge whether the answer is faithful to the chunks.
+
+    Returns {"faithful": bool, "reason": str}.
+    Falls back to {"faithful": False, "reason": "..."} on any error.
+    """
+    from openai import OpenAI
+    from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
+
+    _client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+
+    chunks_text = "\n\n---\n\n".join(
+        f"[{c['id']}] {c['text']}" for c in chunks
+    )
+
+    user_message = (
+        f"QUESTION:\n{question}\n\n"
+        f"CHUNKS:\n{chunks_text}\n\n"
+        f"ANSWER:\n{answer}"
+    )
+
+    try:
+        response = _client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": FAITHFULNESS_JUDGE_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            response_format={"type": "json_object"},
+        )
+        data = json.loads(response.choices[0].message.content)
+        return {
+            "faithful": bool(data.get("faithful", False)),
+            "reason": data.get("reason", ""),
+        }
+    except Exception as exc:
+        logger.error("score_faithfulness failed: %s", exc)
+        return {"faithful": False, "reason": f"Judge error: {exc}"}
+
+
+def run_faithfulness_eval(
+    dataset: list[dict],
+    top_k: int = 5,
+    verbose: bool = True,
+) -> dict:
+    """Run the full RAG pipeline for each eval question, then judge faithfulness.
+
+    For each question:
+      1. search_docs → get retrieved chunks
+      2. answer_from_docs → get the generated answer (non-streaming)
+      3. score_faithfulness → LLM-as-judge verdict
+
+    Returns a dict with:
+      - faithfulness: overall score (float, 0.0–1.0)
+      - total: number of questions evaluated
+      - faithful_count: how many were faithful
+      - per_question: list of per-question results
+      - by_difficulty: faithfulness broken down by difficulty label
+    """
+    from agentforge.rag.document_store import search_docs
+    from agentforge.rag.qa import answer_from_docs
+
+    per_question = []
+    faithful_count = 0
+    difficulty_buckets: dict[str, dict] = {}
+
+    for i, entry in enumerate(dataset):
+        question = entry["question"]
+        difficulty = entry.get("difficulty", "unknown")
+
+        if verbose:
+            print(f"[{i+1}/{len(dataset)}] {entry['id']} ({difficulty})")
+            print(f"  Q: {question}")
+
+        chunks = search_docs(question, top_k=top_k)
+        answer = answer_from_docs(question, top_k=top_k, stream=False)
+
+        verdict = score_faithfulness(question, answer, chunks)
+        is_faithful = verdict["faithful"]
+
+        if is_faithful:
+            faithful_count += 1
+
+        detail = {
+            "id": entry["id"],
+            "question": question,
+            "difficulty": difficulty,
+            "answer": answer,
+            "faithful": is_faithful,
+            "reason": verdict["reason"],
+            "retrieved_ids": [c["id"] for c in chunks],
+        }
+        per_question.append(detail)
+
+        if difficulty not in difficulty_buckets:
+            difficulty_buckets[difficulty] = {"faithful": 0, "total": 0}
+        difficulty_buckets[difficulty]["total"] += 1
+        if is_faithful:
+            difficulty_buckets[difficulty]["faithful"] += 1
+
+        if verbose:
+            status = "FAITHFUL" if is_faithful else "UNFAITHFUL"
+            print(f"  A: {answer[:120]}{'...' if len(answer) > 120 else ''}")
+            print(f"  [{status}] {verdict['reason']}")
+            print()
+
+    total = len(dataset)
+    overall = faithful_count / total if total else 0.0
+    by_difficulty = {
+        d: b["faithful"] / b["total"] if b["total"] else 0.0
+        for d, b in difficulty_buckets.items()
+    }
+
+    logger.info(
+        "Faithfulness eval complete: %.0f%% (%d/%d)",
+        overall * 100, faithful_count, total,
+    )
+
+    return {
+        "faithfulness": overall,
+        "total": total,
+        "faithful_count": faithful_count,
+        "per_question": per_question,
+        "by_difficulty": by_difficulty,
+    }
+
+
 if __name__ == "__main__":
     import sys
 
@@ -212,11 +374,16 @@ if __name__ == "__main__":
         print("\nFix missing chunk IDs before running retrieval eval.")
         sys.exit(1)
 
-    # --- Retrieval eval (requires OPENAI_API_KEY for embeddings) ---
-    run_eval = "--eval" in sys.argv
-    if not run_eval:
-        print("\nTo run retrieval eval, add --eval flag:")
-        print("  python -m agentforge.evaluation --eval")
+    # --- Parse flags ---
+    run_recall = "--eval" in sys.argv
+    run_faith = "--faithfulness" in sys.argv
+
+    if not run_recall and not run_faith:
+        print("\nTo run evaluations, add flags:")
+        print("  python -m agentforge.evaluation --eval              # Recall@K only")
+        print("  python -m agentforge.evaluation --faithfulness      # Faithfulness only")
+        print("  python -m agentforge.evaluation --eval --faithfulness  # Both")
+        print("  Add --top-k=N to change K (default 5)")
         sys.exit(0)
 
     top_k = 5
@@ -224,29 +391,64 @@ if __name__ == "__main__":
         if arg.startswith("--top-k="):
             top_k = int(arg.split("=")[1])
 
-    print(f"\n{'='*60}")
-    print(f"  Running Retrieval Eval (Recall@{top_k})")
-    print(f"{'='*60}\n")
-
-    result = run_retrieval_eval(dataset, top_k=top_k, verbose=True)
-
-    print(f"{'='*60}")
-    print(f"  Recall@{top_k}: {result['recall']:.0%} ({result['total_hits']}/{result['total_expected']})")
-    print()
-    print("  By difficulty:")
-    for diff, score in sorted(result["by_difficulty"].items()):
-        print(f"    {diff:8s}: {score:.0%}")
-    print(f"{'='*60}")
-
-    missed_questions = [q for q in result["per_question"] if q["missed"]]
-    if missed_questions:
-        print(f"\n  {len(missed_questions)} question(s) with missed chunks:")
-        for q in missed_questions:
-            print(f"    {q['id']}: missed {q['missed']}")
-
     RECALL_THRESHOLD = 0.7
-    if result["recall"] < RECALL_THRESHOLD:
-        print(f"\nFAIL: Recall@{top_k} ({result['recall']:.0%}) is below threshold ({RECALL_THRESHOLD:.0%})")
-        sys.exit(1)
-    else:
-        print(f"\nPASS: Recall@{top_k} ({result['recall']:.0%}) meets threshold ({RECALL_THRESHOLD:.0%})")
+    FAITH_THRESHOLD = 0.8
+    failed = False
+
+    # --- Retrieval eval ---
+    if run_recall:
+        print(f"\n{'='*60}")
+        print(f"  Running Retrieval Eval (Recall@{top_k})")
+        print(f"{'='*60}\n")
+
+        recall_result = run_retrieval_eval(dataset, top_k=top_k, verbose=True)
+
+        print(f"{'='*60}")
+        print(f"  Recall@{top_k}: {recall_result['recall']:.0%} ({recall_result['total_hits']}/{recall_result['total_expected']})")
+        print()
+        print("  By difficulty:")
+        for diff, score in sorted(recall_result["by_difficulty"].items()):
+            print(f"    {diff:8s}: {score:.0%}")
+        print(f"{'='*60}")
+
+        missed_questions = [q for q in recall_result["per_question"] if q["missed"]]
+        if missed_questions:
+            print(f"\n  {len(missed_questions)} question(s) with missed chunks:")
+            for q in missed_questions:
+                print(f"    {q['id']}: missed {q['missed']}")
+
+        if recall_result["recall"] < RECALL_THRESHOLD:
+            print(f"\nFAIL: Recall@{top_k} ({recall_result['recall']:.0%}) below threshold ({RECALL_THRESHOLD:.0%})")
+            failed = True
+        else:
+            print(f"\nPASS: Recall@{top_k} ({recall_result['recall']:.0%}) meets threshold ({RECALL_THRESHOLD:.0%})")
+
+    # --- Faithfulness eval ---
+    if run_faith:
+        print(f"\n{'='*60}")
+        print(f"  Running Faithfulness Eval (LLM-as-judge)")
+        print(f"{'='*60}\n")
+
+        faith_result = run_faithfulness_eval(dataset, top_k=top_k, verbose=True)
+
+        print(f"{'='*60}")
+        print(f"  Faithfulness: {faith_result['faithfulness']:.0%} ({faith_result['faithful_count']}/{faith_result['total']})")
+        print()
+        print("  By difficulty:")
+        for diff, score in sorted(faith_result["by_difficulty"].items()):
+            print(f"    {diff:8s}: {score:.0%}")
+        print(f"{'='*60}")
+
+        unfaithful = [q for q in faith_result["per_question"] if not q["faithful"]]
+        if unfaithful:
+            print(f"\n  {len(unfaithful)} unfaithful answer(s):")
+            for q in unfaithful:
+                print(f"    {q['id']}: {q['reason']}")
+
+        if faith_result["faithfulness"] < FAITH_THRESHOLD:
+            print(f"\nFAIL: Faithfulness ({faith_result['faithfulness']:.0%}) below threshold ({FAITH_THRESHOLD:.0%})")
+            failed = True
+        else:
+            print(f"\nPASS: Faithfulness ({faith_result['faithfulness']:.0%}) meets threshold ({FAITH_THRESHOLD:.0%})")
+
+    sys.exit(1 if failed else 0)

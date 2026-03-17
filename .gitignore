@@ -27,5 +27,9 @@ corpus.json
 memory.json
 memory/
 
+# Learning docs, roadmaps, eval data — local reference, not part of source
+docs/
+tests/eval_dataset.json
+
 # IDE and tooling
 .cursor/

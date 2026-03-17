@@ -200,7 +200,7 @@ if __name__ == "__main__":
         id_arg = sys.argv[2] if len(sys.argv) >= 3 else None
         ingest_file(path_arg, id_arg)
     else:
-        # No arguments: run the offline demos (no API key needed)
+        # No arguments: show a chunking demo (read-only, never touches corpus.json)
         sample = """
         First paragraph. It is short.
 
@@ -217,12 +217,8 @@ if __name__ == "__main__":
         for i, c in enumerate(result):
             print(f"  [{i}] ({len(c)} chars): {c[:60]}...")
 
-        minimal = [
-            {"id": "test_chunk_0", "text": "Hello world.", "embedding": [], "source": "test.txt"}
-        ]
-        save_corpus(minimal)
-        loaded = load_corpus()
-        print(f"\nSaved and loaded corpus: {len(loaded)} item(s), id={loaded[0]['id']!r}")
+        corpus = load_corpus()
+        print(f"\nCurrent corpus: {len(corpus)} chunk(s)")
 
         print("\nTo ingest a file, run:")
         print("  python -m agentforge.rag.document_store path/to/file.txt [doc_id]")

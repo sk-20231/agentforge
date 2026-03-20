@@ -1,7 +1,11 @@
-# Environment and secrets
+# Environment and secrets — NEVER commit these
 .env
-.env.local
-*.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*
+*secret*
 
 # Virtual environment
 .venv/
@@ -33,3 +37,5 @@ tests/eval_dataset.json
 
 # IDE and tooling
 .cursor/
+.vscode/
+*.code-workspace

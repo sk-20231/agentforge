@@ -132,7 +132,7 @@ class TestAnswerFromDocs:
         result = answer_from_docs("anything")
         assert "don't have any documents" in result.lower() or "ingest" in result.lower()
 
-    @patch("agentforge.rag.qa.log_event")
+    @patch("agentforge.logger.log_event")
     @patch("agentforge.rag.qa.client")
     @patch("agentforge.rag.qa.search_docs")
     def test_logs_retrieval_and_answer(self, mock_search, mock_client, mock_log):
@@ -149,10 +149,9 @@ class TestAnswerFromDocs:
 
         answer_from_docs("q")
 
-        # Should log both retrieve and answer events
         log_calls = [call[0][0] for call in mock_log.call_args_list]
         assert "docs_qa_retrieve" in log_calls
-        assert "docs_qa_answer" in log_calls
+        assert "docs_qa_generate" in log_calls
 
 
 # ---------- Conversation history tests ----------

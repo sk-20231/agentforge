@@ -83,22 +83,23 @@ if user_input := st.chat_input("Ask me anything..."):
         st.markdown(user_input)
 
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            try:
-                result = run_agent(
-                    user_id=st.session_state.user_id,
-                    session_id="streamlit",
-                    user_input=user_input,
-                    history=st.session_state.history,
-                    stream=False,
-                )
-                if not isinstance(result, str):
-                    result = "".join(result)
-            except Exception as e:
-                logger.error("run_agent failed: %s", e, exc_info=True)
-                result = f"Something went wrong: {e}"
+        try:
+            result = run_agent(
+                user_id=st.session_state.user_id,
+                session_id="streamlit",
+                user_input=user_input,
+                history=st.session_state.history,
+                stream=True,
+            )
 
-        st.markdown(result)
+            if isinstance(result, str):
+                st.markdown(result)
+            else:
+                result = st.write_stream(result)
+        except Exception as e:
+            logger.error("run_agent failed: %s", e, exc_info=True)
+            result = f"Something went wrong: {e}"
+            st.markdown(result)
 
     st.session_state.history.append({"role": "user", "content": user_input})
     st.session_state.history.append({"role": "assistant", "content": result})

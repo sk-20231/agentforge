@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from openai import OpenAI
 from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
 from agentforge.rag.document_store import search_docs
-from agentforge.logger import log_event
+from agentforge.logger import log_event, Span
 from agentforge.conversation import rewrite_query
 
 client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
@@ -76,6 +76,7 @@ def _stream_rag_tokens(
     messages: list[dict],
     valid_ids: set[str],
     user_input: str,
+    trace_id: str = None,
 ) -> Iterator[str]:
     """Stream RAG generation tokens while buffering for the citation guardrail.
 
@@ -118,7 +119,7 @@ def _stream_rag_tokens(
         "token_count": token_count,
         "citations_removed": citations_removed,
         "streamed": True,
-    })
+    }, trace_id=trace_id)
 
     if citations_removed:
         logger.warning(
@@ -128,6 +129,8 @@ def _stream_rag_tokens(
             len(clean_answer),
         )
 
+    log_event("trace_end", {"intent": "DOCS_QA", "streamed": True}, trace_id=trace_id)
+
 
 # ---------- Main RAG function ----------
 
@@ -136,6 +139,7 @@ def answer_from_docs(
     top_k: int = 5,
     history: list[dict] = None,
     stream: bool = False,
+    trace_id: str = None,
 ) -> str | Iterator[str]:
     """
     Full RAG pipeline: rewrite -> retrieve -> prompt -> generate -> guardrail.
@@ -164,30 +168,29 @@ def answer_from_docs(
         that yields tokens one by one when stream=True.
     """
     # 1. Rewrite — resolve follow-up references into a standalone search query.
-    #    Falls back to user_input on failure so retrieval always runs.
-    retrieval_query = rewrite_query(user_input, history or [])
-    log_event("docs_qa_rewrite", {
-        "original": user_input,
-        "rewritten": retrieval_query,
-        "rewrite_applied": retrieval_query != user_input,
-    })
+    with Span("docs_qa_rewrite", trace_id=trace_id) as s:
+        retrieval_query = rewrite_query(user_input, history or [])
+        s.payload = {
+            "original": user_input,
+            "rewritten": retrieval_query,
+            "rewrite_applied": retrieval_query != user_input,
+        }
 
     # 2. Retrieve — use the rewritten query for embedding + similarity search.
-    chunks = search_docs(retrieval_query, top_k=top_k)
-    if not chunks:
-        return "I don't have any documents to answer from. Try ingesting a file first."
-
-    valid_ids = {c["id"] for c in chunks}
-    log_event("docs_qa_retrieve", {
-        "query": retrieval_query,
-        "original_query": user_input,
-        "top_k": top_k,
-        "retrieved_ids": list(valid_ids),
-    })
+    with Span("docs_qa_retrieve", trace_id=trace_id) as s:
+        chunks = search_docs(retrieval_query, top_k=top_k)
+        if not chunks:
+            s.payload = {"top_k": top_k, "retrieved": 0}
+            return "I don't have any documents to answer from. Try ingesting a file first."
+        valid_ids = {c["id"] for c in chunks}
+        s.payload = {
+            "query": retrieval_query,
+            "top_k": top_k,
+            "retrieved_ids": list(valid_ids),
+        }
 
     # 3. Prompt — system prompt (RAG rules + chunks) first, then conversation
     #    history, then the ORIGINAL user_input (not the rewritten query).
-    #    The rewrite was for retrieval only; generation uses the user's exact words.
     prompt = _build_prompt(user_input, chunks)
     messages: list[dict] = [{"role": "system", "content": prompt}]
     if history:
@@ -198,25 +201,24 @@ def answer_from_docs(
     #     guardrail happen lazily as the caller iterates.
     if stream:
         logger.debug("answer_from_docs: returning streaming generator for query=%r.", user_input)
-        return _stream_rag_tokens(messages, valid_ids, user_input)
+        return _stream_rag_tokens(messages, valid_ids, user_input, trace_id=trace_id)
 
     # 4b. Non-streaming path (default) — wait for full response, then guardrail.
-    response = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=messages,
-    )
-    raw_answer = response.choices[0].message.content or ""
+    with Span("docs_qa_generate", trace_id=trace_id) as s:
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+        )
+        raw_answer = response.choices[0].message.content or ""
+        answer = _strip_invalid_citations(raw_answer, valid_ids)
+        s.payload = {
+            "query": user_input,
+            "raw_answer_length": len(raw_answer),
+            "citations_removed": raw_answer != answer,
+            "streamed": False,
+        }
 
-    # 5. Guardrail: strip citations that don't match a retrieved chunk id
-    answer = _strip_invalid_citations(raw_answer, valid_ids)
-
-    log_event("docs_qa_answer", {
-        "query": user_input,
-        "raw_answer_length": len(raw_answer),
-        "citations_removed": raw_answer != answer,
-        "streamed": False,
-    })
-
+    log_event("trace_end", {"intent": "DOCS_QA", "streamed": False}, trace_id=trace_id)
     return answer
 
 

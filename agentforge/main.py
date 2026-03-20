@@ -14,7 +14,7 @@ from agentforge.memory.semantic import (
 )
 from agentforge.memory.response import answer_with_memory
 from agentforge.rag.qa import answer_from_docs
-from agentforge.logger import log_event
+from agentforge.logger import log_event, generate_trace_id, Span
 from agentforge.reasoning.react_engine import react_loop
 from agentforge.conversation import trim_history, count_tokens
 
@@ -73,24 +73,27 @@ def run_agent(
     # We trim here — once, at the entry point — so every pipeline (ANSWER,
     # DOCS_QA, etc.) automatically receives a history that fits the budget.
     # The caller's original list is NOT mutated; trim_history returns a new list.
+    tid = generate_trace_id()
+    log_event("trace_start", {"user_input": user_input, "user_id": user_id}, trace_id=tid)
+
     safe_history = trim_history(history or [], HISTORY_TOKEN_BUDGET)
     log_event("history_trimmed", {
         "original_turns": len(history) // 2 if history else 0,
         "kept_turns": len(safe_history) // 2,
         "estimated_tokens": count_tokens(safe_history),
         "budget": HISTORY_TOKEN_BUDGET,
-    })
+    }, trace_id=tid)
 
     try:
-        intent_data = classify_intent(user_input)
+        with Span("intent_classification", trace_id=tid) as span:
+            intent_data = classify_intent(user_input)
+            span.payload = {
+                "intent": intent_data["intent"],
+                "memory_candidate": intent_data["memory_candidate"],
+                "reason": intent_data["reason"],
+            }
     except Exception:
         return "Something went wrong while understanding your request. Please try again."
-    log_event("intent_classification", {
-        "intent": intent_data["intent"],
-        "memory_candidate": intent_data["memory_candidate"],
-        "reason": intent_data["reason"],
-        "structured_output": True,
-    })
 
     intent = intent_data["intent"]
     memory_candidate = intent_data["memory_candidate"]
@@ -111,53 +114,61 @@ def run_agent(
                     parts.append(f"{key}: {value}")
                 memory_candidate = ". ".join(parts)
             store_memory(user_id, memory_candidate)
+        log_event("trace_end", {"intent": intent}, trace_id=tid)
         return "Got it 👍 I'll remember that."
 
     # -------------------------------
     # ACT (Single tool execution)
     # -------------------------------
     if intent == "ACT":
-        tool_output = run_llm_with_tools(user_id, user_input)
+        with Span("act_tool_pipeline", trace_id=tid) as span:
+            tool_output = run_llm_with_tools(user_id, user_input)
+            try:
+                tool_output = json.loads(tool_output)
+            except json.JSONDecodeError:
+                span.payload = {"error": "invalid_json"}
+                log_event("trace_end", {"intent": intent, "error": True}, trace_id=tid)
+                return "Agent error: invalid tool response."
 
-        try:
-            tool_output = json.loads(tool_output)
-        except json.JSONDecodeError:
-            return "Agent error: invalid tool response."
-
-        reply = tool_output.get("reply", "")
-        store = tool_output.get("store_memory", False)
-        memory_text = tool_output.get("memory_text", "")
+            reply = tool_output.get("reply", "")
+            store = tool_output.get("store_memory", False)
+            memory_text = tool_output.get("memory_text", "")
+            span.payload = {"reply_length": len(reply)}
 
         if store and memory_text:
             store_memory(user_id, memory_text)
 
+        log_event("trace_end", {"intent": intent}, trace_id=tid)
         return reply
 
     # -------------------------------
     # REACT (Multi-step reasoning + tools)
     # -------------------------------
     if intent == "REACT":
-        return run_react_agent(user_id, user_input)
+        with Span("react_pipeline", trace_id=tid) as span:
+            result = run_react_agent(user_id, user_input)
+            span.payload = {"reply_length": len(result)}
+        log_event("trace_end", {"intent": intent}, trace_id=tid)
+        return result
 
     # -------------------------------
     # DOCS_QA (RAG — answer from ingested documents)
-    # When stream=True, answer_from_docs returns an Iterator[str] (generator).
-    # Steps 1-3 (rewrite, retrieve, prompt) are synchronous; only generation streams.
     # -------------------------------
     if intent == "DOCS_QA":
-        return answer_from_docs(user_input, history=safe_history, stream=stream)
+        log_event("pipeline_start", {"pipeline": "docs_qa"}, trace_id=tid)
+        return answer_from_docs(user_input, history=safe_history, stream=stream, trace_id=tid)
 
     # -------------------------------
     # ANSWER / MEMORY-AWARE
-    # When stream=True, answer_with_memory returns an Iterator[str] (generator).
-    # When stream=False (default), it returns str — fully backward compatible.
     # -------------------------------
     if intent in ("ANSWER", "RESPOND_WITH_MEMORY"):
+        log_event("pipeline_start", {"pipeline": "answer_with_memory"}, trace_id=tid)
         return answer_with_memory(user_id, user_input, history=safe_history, stream=stream)
 
     # -------------------------------
     # IGNORE
     # -------------------------------
+    log_event("trace_end", {"intent": intent}, trace_id=tid)
     return "Okay 🙂"
 
 

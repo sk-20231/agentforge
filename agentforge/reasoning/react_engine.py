@@ -8,7 +8,7 @@ from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
 from agentforge.prompts import build_prompt, OUTPUT_SCHEMA, SYSTEM_PROMPT, MEMORY_INSTRUCTIONS
 from agentforge.tools import execute_tool
 from agentforge.memory.semantic import get_relevant_memories, store_memory
-from agentforge.logger import log_event
+from agentforge.logger import log_event, log_token_usage
 
 client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
 logger = logging.getLogger(__name__)
@@ -45,6 +45,7 @@ def react_loop(user_id: str, user_input: str, max_steps: int = 5) -> str:
                 # more costly, since they abort a multi-step reasoning chain.
                 response_format={"type": "json_object"},
             )
+            log_token_usage(response, f"react_step_{step + 1}")
             raw = response.choices[0].message.content
         except Exception as e:
             logger.error("react_loop: LLM call failed on step %d: %s", step + 1, e, exc_info=True)

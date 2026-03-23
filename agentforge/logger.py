@@ -82,6 +82,149 @@ class Span:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Step 14 — Cost tracking
+# ---------------------------------------------------------------------------
+
+# Per-token pricing in USD. Update when model pricing changes.
+# Source: https://openai.com/api/pricing/
+MODEL_COSTS: dict[str, dict[str, float]] = {
+    "gpt-4o-mini": {"prompt": 0.15 / 1_000_000, "completion": 0.60 / 1_000_000},
+    "gpt-4o":      {"prompt": 2.50 / 1_000_000, "completion": 10.0 / 1_000_000},
+    "gpt-4":       {"prompt": 30.0 / 1_000_000, "completion": 60.0 / 1_000_000},
+    "gpt-3.5-turbo": {"prompt": 0.50 / 1_000_000, "completion": 1.50 / 1_000_000},
+}
+
+
+def log_token_usage(
+    response,
+    operation: str,
+    trace_id: str = None,
+    model: str = None,
+):
+    """Extract token usage from an OpenAI response and log it with cost estimate.
+
+    Wrapped in try/except so cost tracking never breaks core agent functionality.
+
+    Args:
+        response:  The ChatCompletion response object (must have .usage).
+        operation: Human-readable label (e.g. "intent_classification", "docs_qa_generate").
+        trace_id:  Optional trace ID for linking to a run_agent call.
+        model:     Model name override. If None, reads from response.model.
+    """
+    try:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+
+        model_name = model or str(getattr(response, "model", "unknown"))
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = prompt_tokens + completion_tokens
+
+        costs = MODEL_COSTS.get(model_name, MODEL_COSTS.get("gpt-4o-mini"))
+        cost_usd = (prompt_tokens * costs["prompt"]) + (completion_tokens * costs["completion"])
+
+        log_event("token_usage", {
+            "operation": operation,
+            "model": model_name,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "cost_usd": round(cost_usd, 6),
+        }, trace_id=trace_id)
+    except Exception:
+        pass
+
+
+def compute_cost_summary(log_path: str = None) -> dict:
+    """Read the log file and aggregate token usage and cost per operation.
+
+    Returns:
+        {
+            "by_operation": {
+                "intent_classification": {"calls": 10, "prompt_tokens": 2000, "completion_tokens": 500, "cost_usd": 0.0006},
+                ...
+            },
+            "total": {"calls": 50, "prompt_tokens": 15000, "completion_tokens": 5000, "cost_usd": 0.012}
+        }
+    """
+    path = log_path or AGENT_LOG_FILE
+    ops: dict[str, dict] = {}
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("event") != "token_usage":
+                    continue
+                p = record.get("payload", {})
+                op = p.get("operation", "unknown")
+                if op not in ops:
+                    ops[op] = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0}
+                ops[op]["calls"] += 1
+                ops[op]["prompt_tokens"] += p.get("prompt_tokens", 0)
+                ops[op]["completion_tokens"] += p.get("completion_tokens", 0)
+                ops[op]["cost_usd"] += p.get("cost_usd", 0.0)
+    except FileNotFoundError:
+        return {"by_operation": {}, "total": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0}}
+
+    total = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0}
+    for v in ops.values():
+        total["calls"] += v["calls"]
+        total["prompt_tokens"] += v["prompt_tokens"]
+        total["completion_tokens"] += v["completion_tokens"]
+        total["cost_usd"] += v["cost_usd"]
+    total["cost_usd"] = round(total["cost_usd"], 6)
+    for v in ops.values():
+        v["cost_usd"] = round(v["cost_usd"], 6)
+
+    return {"by_operation": dict(sorted(ops.items())), "total": total}
+
+
+def compute_trace_cost(trace_id: str, log_path: str = None) -> dict:
+    """Get the total cost and token breakdown for a single trace (one run_agent call).
+
+    Returns:
+        {"calls": 3, "prompt_tokens": 800, "completion_tokens": 200,
+         "cost_usd": 0.0003, "operations": ["intent_classification", "docs_qa_generate", ...]}
+    """
+    path = log_path or AGENT_LOG_FILE
+    result = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "operations": []}
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("event") != "token_usage":
+                    continue
+                if record.get("trace_id") != trace_id:
+                    continue
+                p = record.get("payload", {})
+                result["calls"] += 1
+                result["prompt_tokens"] += p.get("prompt_tokens", 0)
+                result["completion_tokens"] += p.get("completion_tokens", 0)
+                result["cost_usd"] += p.get("cost_usd", 0.0)
+                result["operations"].append(p.get("operation", "unknown"))
+    except FileNotFoundError:
+        pass
+
+    result["cost_usd"] = round(result["cost_usd"], 6)
+    return result
+
+
 def compute_latency_percentiles(log_path: str = None) -> dict:
     """Read the log file and compute P50/P95 latency per event type.
 

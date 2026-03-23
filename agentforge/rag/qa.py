@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from openai import OpenAI
 from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
 from agentforge.rag.document_store import search_docs
-from agentforge.logger import log_event, Span
+from agentforge.logger import log_event, Span, log_token_usage
 from agentforge.conversation import rewrite_query
 
 client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
@@ -98,11 +98,16 @@ def _stream_rag_tokens(
         model=OPENAI_MODEL,
         messages=messages,
         stream=True,
+        stream_options={"include_usage": True},
     )
 
     full_text = ""
     token_count = 0
     for chunk in response:
+        if chunk.usage:
+            log_token_usage(chunk, "docs_qa_generate_stream", trace_id=trace_id)
+        if not chunk.choices:
+            continue
         token = chunk.choices[0].delta.content
         if token:
             full_text += token
@@ -169,7 +174,7 @@ def answer_from_docs(
     """
     # 1. Rewrite — resolve follow-up references into a standalone search query.
     with Span("docs_qa_rewrite", trace_id=trace_id) as s:
-        retrieval_query = rewrite_query(user_input, history or [])
+        retrieval_query = rewrite_query(user_input, history or [], trace_id=trace_id)
         s.payload = {
             "original": user_input,
             "rewritten": retrieval_query,
@@ -209,6 +214,7 @@ def answer_from_docs(
             model=OPENAI_MODEL,
             messages=messages,
         )
+        log_token_usage(response, "docs_qa_generate", trace_id=trace_id)
         raw_answer = response.choices[0].message.content or ""
         answer = _strip_invalid_citations(raw_answer, valid_ids)
         s.payload = {

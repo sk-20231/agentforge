@@ -35,6 +35,9 @@ memory/
 docs/
 tests/eval_dataset.json
 
+# AI assistant context files — local reference, not part of source
+CLAUDE.md
+
 # IDE and tooling
 .cursor/
 .vscode/

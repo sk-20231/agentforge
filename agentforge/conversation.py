@@ -21,6 +21,7 @@ import logging
 
 from openai import OpenAI
 from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
+from agentforge.logger import log_token_usage
 
 client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
 logger = logging.getLogger(__name__)
@@ -106,7 +107,7 @@ def trim_history(history: list[dict], budget: int) -> list[dict]:
 
 # ---------- Query rewriting ----------
 
-def rewrite_query(user_input: str, history: list[dict]) -> str:
+def rewrite_query(user_input: str, history: list[dict], trace_id: str = None) -> str:
     """
     Rewrite a potentially ambiguous follow-up question into a standalone query
     suitable for RAG retrieval.
@@ -170,6 +171,7 @@ Standalone question:"""
             max_tokens=128,   # rewrites are always short
             temperature=0,    # deterministic — same input should give same rewrite
         )
+        log_token_usage(response, "query_rewrite", trace_id=trace_id)
         rewritten = (response.choices[0].message.content or "").strip()
 
         if not rewritten:

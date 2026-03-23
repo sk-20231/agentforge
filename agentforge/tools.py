@@ -9,7 +9,7 @@ from typing import Dict, Callable, Any, Union
 from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
 from agentforge.prompts import SYSTEM_PROMPT, MEMORY_INSTRUCTIONS, OUTPUT_SCHEMA
 from agentforge.memory.semantic import get_relevant_memories
-from agentforge.logger import log_event
+from agentforge.logger import log_event, log_token_usage
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +176,7 @@ def execute_tool(name: str, arguments: Dict[str, Any]) -> str:
 
 # -------------------- MAIN ENTRY --------------------
 
-def run_llm_with_tools(user_id: str, user_input: str) -> str:
+def run_llm_with_tools(user_id: str, user_input: str, trace_id: str = None) -> str:
     """
     Executes the LLM call, handles tool calls if any,
     and returns the FINAL model output as a raw JSON string.
@@ -193,6 +193,7 @@ def run_llm_with_tools(user_id: str, user_input: str) -> str:
             # is tool), and the agent shows a blank response.
             tool_choice="required",
         )
+        log_token_usage(response, "act_tool_call", trace_id=trace_id)
     except Exception as e:
         return json.dumps({
             "reply": "I couldn't complete that request due to a service error. Please try again.",
@@ -251,6 +252,7 @@ def run_llm_with_tools(user_id: str, user_input: str) -> str:
                     },
                 ]
             )
+            log_token_usage(followup, "act_tool_followup", trace_id=trace_id)
             return followup.choices[0].message.content
         except Exception:
             return json.dumps({

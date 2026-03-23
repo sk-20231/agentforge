@@ -14,23 +14,24 @@ from agentforge.memory.semantic import (
 )
 from agentforge.memory.response import answer_with_memory
 from agentforge.rag.qa import answer_from_docs
-from agentforge.logger import log_event, generate_trace_id, Span
+from agentforge.logger import log_event, generate_trace_id, Span, log_token_usage
 from agentforge.reasoning.react_engine import react_loop
 from agentforge.conversation import trim_history, count_tokens
 
 client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
 
 
-def simple_llm_answer(user_input: str) -> str:
+def simple_llm_answer(user_input: str, trace_id: str = None) -> str:
     """Non-streaming LLM call. Returns the full response as a single string."""
     response = client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=[{"role": "user", "content": user_input}],
     )
+    log_token_usage(response, "simple_llm_answer", trace_id=trace_id)
     return response.choices[0].message.content
 
 
-def stream_llm_answer(user_input: str) -> Iterator[str]:
+def stream_llm_answer(user_input: str, trace_id: str = None) -> Iterator[str]:
     """Stream a basic LLM response token by token.
 
     Uses stream=True so the API returns one ChatCompletionChunk per token
@@ -44,9 +45,14 @@ def stream_llm_answer(user_input: str) -> Iterator[str]:
         model=OPENAI_MODEL,
         messages=[{"role": "user", "content": user_input}],
         stream=True,
+        stream_options={"include_usage": True},
     )
     token_count = 0
     for chunk in response:
+        if chunk.usage:
+            log_token_usage(chunk, "stream_llm_answer", trace_id=trace_id)
+        if not chunk.choices:
+            continue
         token = chunk.choices[0].delta.content
         if token:
             token_count += 1
@@ -68,12 +74,13 @@ def run_agent(
     user_input: str,
     history: list[dict] = None,
     stream: bool = False,
+    trace_id: str = None,
 ) -> str | Iterator[str]:
     # Trim history to the configured token budget before any LLM call.
     # We trim here — once, at the entry point — so every pipeline (ANSWER,
     # DOCS_QA, etc.) automatically receives a history that fits the budget.
     # The caller's original list is NOT mutated; trim_history returns a new list.
-    tid = generate_trace_id()
+    tid = trace_id or generate_trace_id()
     log_event("trace_start", {"user_input": user_input, "user_id": user_id}, trace_id=tid)
 
     safe_history = trim_history(history or [], HISTORY_TOKEN_BUDGET)
@@ -86,7 +93,7 @@ def run_agent(
 
     try:
         with Span("intent_classification", trace_id=tid) as span:
-            intent_data = classify_intent(user_input)
+            intent_data = classify_intent(user_input, trace_id=tid)
             span.payload = {
                 "intent": intent_data["intent"],
                 "memory_candidate": intent_data["memory_candidate"],
@@ -122,7 +129,7 @@ def run_agent(
     # -------------------------------
     if intent == "ACT":
         with Span("act_tool_pipeline", trace_id=tid) as span:
-            tool_output = run_llm_with_tools(user_id, user_input)
+            tool_output = run_llm_with_tools(user_id, user_input, trace_id=tid)
             try:
                 tool_output = json.loads(tool_output)
             except json.JSONDecodeError:
@@ -163,7 +170,7 @@ def run_agent(
     # -------------------------------
     if intent in ("ANSWER", "RESPOND_WITH_MEMORY"):
         log_event("pipeline_start", {"pipeline": "answer_with_memory"}, trace_id=tid)
-        return answer_with_memory(user_id, user_input, history=safe_history, stream=stream)
+        return answer_with_memory(user_id, user_input, history=safe_history, stream=stream, trace_id=tid)
 
     # -------------------------------
     # IGNORE
@@ -176,7 +183,7 @@ def run_agent(
 # Intent Classification (Phase 3.2)
 # -------------------------------
 
-def classify_intent(user_input: str) -> dict:
+def classify_intent(user_input: str, trace_id: str = None) -> dict:
     # Prompt no longer needs "return ONLY valid JSON" instructions —
     # response_format={"type": "json_object"} enforces that at the API level.
     # The prompt still describes the expected keys and value constraints because
@@ -230,6 +237,7 @@ Respond with a JSON object with exactly these keys:
             # guarantees structure, not the correct keys or intent values.
             response_format={"type": "json_object"},
         )
+        log_token_usage(response, "intent_classification", trace_id=trace_id)
         raw = response.choices[0].message.content
         if not raw or not raw.strip():
             return _default_intent(user_input)

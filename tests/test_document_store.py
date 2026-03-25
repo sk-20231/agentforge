@@ -8,7 +8,7 @@ import json
 import pytest
 from unittest.mock import patch, MagicMock
 
-from agentforge.rag.document_store import chunk_text, search_docs, load_corpus, save_corpus
+from agentforge.rag.document_store import chunk_text, search_docs, load_corpus, save_corpus, list_sources
 
 
 # ---------- chunk_text (pure, no mocks) ----------
@@ -88,6 +88,78 @@ class TestCorpusPersistence:
             "agentforge.rag.document_store.AGENT_CORPUS_FILE", str(path)
         )
         assert load_corpus() == []
+
+    def test_model_mismatch_raises_runtime_error(self, tmp_path, monkeypatch):
+        """Corpus built with a different model → RuntimeError (fail-fast).
+        This is the core guard against silent embedding space mismatch.
+        """
+        path = str(tmp_path / "corpus.json")
+        monkeypatch.setattr("agentforge.rag.document_store.AGENT_CORPUS_FILE", path)
+
+        # Write a corpus that claims a different embedding model
+        data = {
+            "embedding_model": "some-other-model-that-is-not-configured",
+            "chunks": [{"id": "c0", "text": "hello", "embedding": [0.1], "source": "x.txt"}],
+        }
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+        with pytest.raises(RuntimeError, match="(?i)embedding model mismatch"):
+            load_corpus()
+
+    def test_old_format_bare_list_loads_without_error(self, tmp_path, monkeypatch):
+        """Corpus in old bare-list format (no model metadata) loads as-is.
+        Backward compatibility: existing corpora created before this change
+        still work — they just don't get model validation.
+        """
+        path = str(tmp_path / "corpus.json")
+        monkeypatch.setattr("agentforge.rag.document_store.AGENT_CORPUS_FILE", path)
+
+        old_corpus = [{"id": "c0", "text": "hello", "embedding": [0.1, 0.2], "source": "x.txt"}]
+        with open(path, "w") as f:
+            json.dump(old_corpus, f)
+
+        loaded = load_corpus()
+        assert len(loaded) == 1
+        assert loaded[0]["id"] == "c0"
+
+    def test_list_sources_returns_unique_sorted_sources(self, tmp_path, monkeypatch):
+        """list_sources() returns unique filenames sorted — the checklist before deleting corpus."""
+        path = str(tmp_path / "corpus.json")
+        monkeypatch.setattr("agentforge.rag.document_store.AGENT_CORPUS_FILE", path)
+
+        corpus = [
+            {"id": "a_0", "text": "x", "embedding": [0.1], "source": "zebra.txt"},
+            {"id": "a_1", "text": "y", "embedding": [0.2], "source": "alpha.txt"},
+            {"id": "a_2", "text": "z", "embedding": [0.3], "source": "zebra.txt"},  # duplicate source
+        ]
+        save_corpus(corpus)
+
+        sources = list_sources()
+        assert sources == ["alpha.txt", "zebra.txt"]   # sorted, deduplicated
+
+    def test_list_sources_empty_corpus_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "agentforge.rag.document_store.AGENT_CORPUS_FILE",
+            str(tmp_path / "nonexistent.json"),
+        )
+        assert list_sources() == []
+
+    def test_save_stores_embedding_model_name(self, tmp_path, monkeypatch):
+        """save_corpus writes the model name into the file alongside the chunks.
+        This is what enables load_corpus to detect mismatches later.
+        """
+        path = str(tmp_path / "corpus.json")
+        monkeypatch.setattr("agentforge.rag.document_store.AGENT_CORPUS_FILE", path)
+
+        save_corpus([{"id": "c0", "text": "hi", "embedding": [0.1], "source": "x.txt"}])
+
+        with open(path) as f:
+            raw = json.load(f)
+
+        assert "embedding_model" in raw
+        assert "chunks" in raw
+        assert len(raw["chunks"]) == 1
 
 
 # ---------- search_docs (mocked embedding + corpus) ----------

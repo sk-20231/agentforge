@@ -8,7 +8,7 @@ import os
 import re
 import sys
 
-from agentforge.config import AGENT_CORPUS_FILE
+from agentforge.config import AGENT_CORPUS_FILE, OPENAI_EMBEDDING_MODEL
 from agentforge.memory.semantic import get_embedding, cosine_similarity
 
 
@@ -69,26 +69,76 @@ def load_corpus() -> list[dict]:
     Load the corpus from the JSON file (path from config).
     Returns a list of items with id, text, embedding, source.
     Returns [] if the file does not exist or is empty/invalid.
+
+    Embedding model validation (fail-fast):
+    If the corpus was saved with a different embedding model than the one
+    currently configured, raises RuntimeError immediately. Mixing embeddings
+    from different models produces meaningless similarity scores — silent
+    corruption that's worse than a loud crash.
+
+    Backward compatibility:
+    Old corpus files (bare JSON array, no model metadata) are loaded as-is
+    without validation. Re-save them via ingest to upgrade to the new format.
     """
     path = AGENT_CORPUS_FILE
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, list) else []
     except FileNotFoundError:
         return []
     except (json.JSONDecodeError, TypeError):
         return []
 
+    # New format: {"embedding_model": "...", "chunks": [...]}
+    if isinstance(data, dict):
+        stored_model = data.get("embedding_model")
+        if stored_model and stored_model != OPENAI_EMBEDDING_MODEL:
+            raise RuntimeError(
+                f"\n"
+                f"  ⚠  EMBEDDING MODEL MISMATCH — your corpus is SAFE, nothing has been deleted.\n"
+                f"\n"
+                f"  Why this is happening:\n"
+                f"    Your corpus was built with '{stored_model}'\n"
+                f"    but OPENAI_EMBEDDING_MODEL is now set to '{OPENAI_EMBEDDING_MODEL}'.\n"
+                f"    Vectors from different models live in incompatible spaces — mixing\n"
+                f"    them produces meaningless similarity scores and broken retrieval.\n"
+                f"\n"
+                f"  If this was unintentional:\n"
+                f"    Revert OPENAI_EMBEDDING_MODEL back to '{stored_model}' in config.py\n"
+                f"    (or in your .env file) and restart.\n"
+                f"\n"
+                f"  If you intentionally switched models:\n"
+                f"    1. Run this first to see what's in your corpus:\n"
+                f"         python -m agentforge.rag.document_store --list-sources\n"
+                f"    2. Make sure you still have those files on disk.\n"
+                f"    3. Delete corpus.json  (this is permanent — step 1 first!)\n"
+                f"    4. Re-ingest each file:\n"
+                f"         python -m agentforge.rag.document_store path/to/file.txt\n"
+                f"    5. Verify the new corpus:\n"
+                f"         python -m agentforge.rag.document_store --list-sources\n"
+            )
+        return data.get("chunks", [])
+
+    # Old format: bare list — no model validation possible, load as-is
+    if isinstance(data, list):
+        return data
+
+    return []
+
 
 def save_corpus(corpus: list[dict]) -> None:
     """
     Write the corpus (list of {id, text, embedding, source}) to the JSON file.
-    Overwrites the file. Use the path from config (AGENT_CORPUS_FILE).
+    Stores the current embedding model name alongside the chunks so that
+    load_corpus() can detect model mismatches on future loads.
     """
     path = AGENT_CORPUS_FILE
+    data = {
+        "embedding_model": OPENAI_EMBEDDING_MODEL,
+        "chunks": corpus,
+    }
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(corpus, f, indent=2)
+        json.dump(data, f, indent=2)
 
 
 # ---------- Ingest (chunk + embed + save) ----------
@@ -192,33 +242,51 @@ def ingest_file(file_path: str, doc_id: str = None) -> int:
     return n
 
 
+def list_sources() -> list[str]:
+    """
+    Return the unique source filenames currently in the corpus, sorted.
+
+    Use this BEFORE deleting corpus.json when switching embedding models —
+    it tells you exactly which files you'll need to re-ingest.
+
+    Returns [] if the corpus is empty or does not exist.
+    Note: raises RuntimeError if corpus exists but has a model mismatch
+    (same guard as load_corpus). In that case, read corpus.json directly
+    to inspect the 'chunks[*].source' field manually.
+    """
+    corpus = load_corpus()
+    sources = sorted({item.get("source", "") for item in corpus if item.get("source")})
+    return sources
+
+
 if __name__ == "__main__":
-    # CLI mode: ingest a file from disk
+    # CLI usage:
     #   python -m agentforge.rag.document_store path/to/file.txt [optional_doc_id]
-    if len(sys.argv) >= 2:
+    #   python -m agentforge.rag.document_store --list-sources
+    if len(sys.argv) >= 2 and sys.argv[1] == "--list-sources":
+        sources = list_sources()
+        corpus = load_corpus()
+        print(f"\nCorpus: {len(corpus)} chunk(s) from {len(sources)} source file(s)")
+        print(f"Embedding model: {OPENAI_EMBEDDING_MODEL}\n")
+        if sources:
+            print("Ingested sources (you will need these files to re-ingest):")
+            for s in sources:
+                count = sum(1 for c in corpus if c.get("source") == s)
+                print(f"  {s}  ({count} chunk(s))")
+        else:
+            print("  (corpus is empty)")
+        print()
+
+    elif len(sys.argv) >= 2:
         path_arg = sys.argv[1]
         id_arg = sys.argv[2] if len(sys.argv) >= 3 else None
         ingest_file(path_arg, id_arg)
+
     else:
-        # No arguments: show a chunking demo (read-only, never touches corpus.json)
-        sample = """
-        First paragraph. It is short.
-
-        Second paragraph is much longer. It has many words so that we can see how
-        chunking works when a single paragraph exceeds the max_chars limit. We want
-        to split it into overlapping pieces so that no important context is lost
-        at the boundary between one chunk and the next. Overlap helps the model
-        see a bit of the previous chunk when answering from the next one.
-
-        Third paragraph. Also short.
-        """
-        result = chunk_text(sample.strip(), max_chars=120, overlap=30)
-        print(f"Got {len(result)} chunks:")
-        for i, c in enumerate(result):
-            print(f"  [{i}] ({len(c)} chars): {c[:60]}...")
-
+        # No arguments: show usage and current corpus stats
         corpus = load_corpus()
         print(f"\nCurrent corpus: {len(corpus)} chunk(s)")
-
-        print("\nTo ingest a file, run:")
+        print(f"Embedding model: {OPENAI_EMBEDDING_MODEL}")
+        print("\nUsage:")
         print("  python -m agentforge.rag.document_store path/to/file.txt [doc_id]")
+        print("  python -m agentforge.rag.document_store --list-sources")

@@ -1,0 +1,82 @@
+# =============================================================================
+# CI Workflow — Unit Tests
+# =============================================================================
+#
+# WHAT THIS DOES:
+#   Runs all 127 unit tests on every push and pull request.
+#   These tests use mocked OpenAI calls — no real API key needed.
+#   Fast gate: if the code is broken, this tells you in ~30 seconds.
+#
+# WHY TWO SEPARATE WORKFLOWS?
+#   This one answers: "Does the code work?"
+#   eval.yml answers: "Is the AI still any good?"
+#   Separating them means every PR gets fast feedback without burning
+#   API credits on quality checks that only matter when merging to main.
+#
+# AI CONCEPT — Testing AI systems:
+#   Traditional software: unit tests check correctness (right answer or wrong).
+#   AI systems: unit tests check that the plumbing works (does the function
+#   return something? does it call the right methods?). They can't tell you
+#   if the RAG retrieval quality degraded — that requires real eval.
+#   This is why we need BOTH workflows.
+#
+# =============================================================================
+
+name: CI — Unit Tests
+
+on:
+  push:
+    branches: ["**"]        # every branch, every push
+  pull_request:
+    branches: ["**"]        # every PR, regardless of target branch
+
+jobs:
+  test:
+    name: Run unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ["3.11"]   # expand to ["3.10", "3.11", "3.12"] later
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Check out the code
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 2. Set up Python with pip caching
+      #    The cache key includes requirements files — any change to deps
+      #    invalidates the cache and re-installs from scratch.
+      # -----------------------------------------------------------------------
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      # -----------------------------------------------------------------------
+      # 3. Install dependencies
+      # -----------------------------------------------------------------------
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      # -----------------------------------------------------------------------
+      # 4. Run the full test suite
+      #    --tb=short  → compact traceback on failures
+      #    -v          → one line per test so you can see exactly what failed
+      #
+      #    Exit code: pytest exits 0 (pass) or non-zero (fail).
+      #    GitHub Actions fails the job on any non-zero exit — this is the
+      #    mechanism that blocks a PR merge when tests are red.
+      # -----------------------------------------------------------------------
+      - name: Run unit tests
+        run: pytest tests/ -v --tb=short

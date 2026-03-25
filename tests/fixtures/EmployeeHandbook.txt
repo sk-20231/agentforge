@@ -1,0 +1,62 @@
+Internal Document: SolarTech Dynamics Employee Handbook (v4.2)
+1. Office Locations & Access
+Headquarters (The Hub): Located at 4520 Nebula Lane, Seattle. Access requires a Level 2 Biometric scan.
+Satellite Office (The Satellite): Located in Austin, TX. This is a "quiet-only" zone—no voice calls are permitted in open areas.
+Operating Hours: Standard hours are 10:00 AM to 4:00 PM Core Time. Employees must be online during these hours.
+2. "Green-Stripe" Bonus Program
+Eligibility: Employees who commute via electric unicycle or carpool with at least 3 others.
+Reward: A monthly stipend of $150 "Solar-Credits" which can be redeemed at the company cafeteria or for extra PTO (100 credits = 1 day).
+Reporting: Credits must be logged in the EcoPortal by the 25th of each month.
+3. Pet Policy (The "Paws-In" Initiative)
+Permitted Animals: Dogs and domestic cats are allowed on Tuesdays and Thursdays.
+Exclusions: No reptiles or birds are allowed due to the sensitive HVAC filters in the lab.
+Requirement: All pets must wear a "SolarTech Guest" lanyard at all times.
+4. Professional Development (The "Deep-Dive" Fund)
+Annual Budget: Each employee receives $3,250 per year for learning.
+Restriction: This cannot be used for "General Management" courses; it must be used for technical skills or "Future-Tech" certifications (e.g., Quantum Computing, Fusion Maintenance).
+Approval: Requests must be submitted to "Manager Sarah" at least 14 days before the course start date.
+5. Annual Retreat
+2024 Location: The retreat will be held at the Blue Ridge Crater in Arizona.
+Mandatory Item: All attendees must bring their own reusable "Hydro-Flask" (Company-issued Model X-1).
+6. Leave & Time-Off (The "Recharge" Protocol)
+"Sun-Sync" Leave: Employees are entitled to 2 days of "Sun-Sync" leave per year, specifically for use during a Total Solar Eclipse or a verified Aurora Borealis event in their region.
+Parental Leave: 16 weeks of fully paid leave. Re-entry requires a "Sync-Up" week where the employee works only 10 hours at full pay to adjust.
+Bereavement: 5 days for immediate family; 1 day for the loss of a long-term digital asset or AI companion (requires "Manager Sarah" approval).
+7. Hardware & Equipment (The "Gear-Up" Suite)
+Standard Issue: All employees receive a Solar-Pad Pro and a Neural-Link headset (optional).
+Maintenance: Equipment must be brought to the "Tech-Bar" every 6 months for a "Photon-Cleaning."
+Home Office Stipend: A one-time $1,200 grant for ergonomic furniture. Note: Treadmill desks are encouraged but must be under 65 decibels.
+Replacement Policy: Lost hardware incurs a 15% "Solar-Credit" penalty unless a police report or "Act of Nature" certificate is provided.
+8. Communication Etiquette (The "Signal" Guidelines)
+Email "Dark Hours": No internal emails should be sent between 7:00 PM and 7:00 AM. If an emergency occurs, use the "Red-Alert" Slack channel.
+Meeting "Mute" Rule: In meetings with more than 8 people, all microphones must be muted unless the "Speaker's Prism" (digital icon) is assigned to you.
+AI Assistants: When using AI to draft responses to clients, the footer must include the disclaimer: "Assisted by Solar-Intelligence v2.1."
+9. Health & Wellness (The "Bio-Balance" Tier)
+Vitamin D Initiative: HQ (The Hub) features "Light-Therapy" pods. Usage is limited to 20 minutes per session.
+Mental Health: 10 sessions per year with "Mind-Cloud" therapists are fully covered.
+Gym Subsidy: $80/month toward any gym that uses kinetic-energy-recovery machines.
+10. Security & Data (The "Shield" Framework)
+Password Rotation: Passwords must be 16 characters and changed every 90 days. Biometric overrides are permitted at The Hub only.
+Guest Access: Guests at the Austin Satellite must be escorted at all times and are forbidden from entering the "Faraday Cage" testing room.
+Data Classification: "Level-Blue" data (Project Orion) is strictly "Read-Only" on mobile devices.
+11. Tiered Solar-Credit Conversion Table
+To test how your agent handles structured data and multi-step calculations, use this table for credit redemption:
+Redemption Item	Cost (Solar-Credits)	Limit per Month	Approval Required
+Cafeteria Voucher ($20)	15 Credits	5 Vouchers	No
+Extra PTO Day	100 Credits	2 Days	Yes (Manager Sarah)
+Carbon-Offset Certificate	50 Credits	Unlimited	No
+Tech-Bar Upgrade Kit	250 Credits	1 Kit	Yes (IT Dept)
+12. Travel & Reimbursement (The "Orbit" Policy)
+Mode of Transport: For trips under 300 miles, employees must use the "Hyper-Rail" or a company-approved EV. Flights are only permitted for "Level-Red" urgent client meetings.
+Lodging: Maximum $250/night. Booking must be done via the "Star-Stay" portal.
+Per Diem: $75/day for meals. This is reduced to $25/day if the hotel provides a "Solar-Breakfast."
+Receipts: Digital copies are mandatory. Physical receipts are only accepted if they are "Thermal-Printed" and scanned within 48 hours.
+13. The "Deep-Freeze" Protocol (Emergency Procedures)
+Definition: Activated when the Seattle HQ temperature drops below 55°F or during a city-wide power grid failure.
+Action: All Level 1 staff must migrate to "The Bunker" (Floor B2).
+Data Lockdown: During a Deep-Freeze, all "Project Orion" files are encrypted. Access requires a physical YubiKey 5C and a 12-digit "Freeze-Code" found in the physical safe in Manager Sarah's office.
+Communication: If Slack is down, employees must tune to FM Radio 98.2 for status updates.
+14. Project "Orion" Confidentiality (Level-Blue Access)
+Non-Disclosure: Employees assigned to Project Orion (Fusion-Battery tech) must sign a "Neural-NDA".
+Device Restriction: No personal smartphones are allowed within 10 feet of the "Plasma-Rig".
+External Discussion: Project Orion may be discussed with "Strategic Partners" (listed in Appendix G) only if a "Blue-Shield" VPN is active.

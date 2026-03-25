@@ -1,0 +1,144 @@
+# =============================================================================
+# Eval Gate Workflow — AI Quality Gating
+# =============================================================================
+#
+# WHAT THIS DOES:
+#   After code merges to main, this workflow:
+#     1. Ingests the test document (EmployeeHandbook.txt) → builds a corpus
+#     2. Runs Recall@K eval  → checks retrieval quality  (threshold: ≥ 70%)
+#     3. Runs Faithfulness eval → checks answer quality (threshold: ≥ 80%)
+#   If either metric falls below its threshold, this job FAILS and you know
+#   a recent change degraded AI quality — even if all unit tests passed.
+#
+# WHY NOT ON EVERY PR?
+#   Each eval run makes real OpenAI API calls (costs money + takes ~2 minutes).
+#   We only want to pay for this when code actually lands on main.
+#   PRs get the fast unit-test gate (ci.yml). Main gets the quality gate.
+#
+# AI CONCEPT — Eval gating vs. unit testing:
+#   Unit test:  assert recall_at_k(["a"], ["a", "b"]) == 1.0   ← deterministic
+#   Eval gate:  run 30 real questions through the live RAG pipeline and
+#               measure aggregate recall. This catches regressions that unit
+#               tests can't — like a prompt change that silently makes answers
+#               less faithful, or a chunking change that misses key passages.
+#
+# AI CONCEPT — LLM-as-judge (faithfulness):
+#   We can't write assert statements for answer quality. Instead we ask a
+#   second LLM: "Is this answer faithful to these source chunks?" and treat
+#   its verdict as our metric. This is the same pattern used by RAGAS,
+#   DeepEval, and other production eval frameworks.
+#
+# HOW TO SET UP THE SECRET:
+#   1. Go to your GitHub repo → Settings → Secrets and variables → Actions
+#   2. Click "New repository secret"
+#   3. Name: OPENAI_API_KEY
+#   4. Value: your sk-... key
+#   The workflow reads it as: ${{ secrets.OPENAI_API_KEY }}
+#   GitHub never prints secrets in logs — they appear as *** even if you try
+#   to echo them. Safe to store here.
+#
+# HOW TO TRIGGER MANUALLY:
+#   Go to GitHub → Actions tab → "Eval Gate" → "Run workflow"
+#   Useful when you want to check quality without pushing code.
+#
+# =============================================================================
+
+name: Eval Gate — Recall@K & Faithfulness
+
+on:
+  push:
+    branches: [main]          # runs every time code lands on main
+  workflow_dispatch:           # also triggerable manually from the Actions tab
+
+jobs:
+  eval:
+    name: AI quality gate (Recall@K ≥ 70%, Faithfulness ≥ 80%)
+    runs-on: ubuntu-latest
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Check out the code
+      #    The repo contains:
+      #      - tests/fixtures/EmployeeHandbook.txt    (the test document)
+      #      - tests/fixtures/test_corpus.json        (PRE-BUILT corpus — committed)
+      #      - tests/eval_dataset.json                (Q&A pairs with expected chunks)
+      #
+      #    WHY test_corpus.json IS COMMITTED:
+      #    Generating a corpus requires calling the OpenAI embeddings API for every
+      #    chunk (~13 API calls). Since the document never changes between CI runs,
+      #    re-ingesting on every push is pure waste. Instead, we commit a pre-built
+      #    corpus as a tracked fixture. Recall@K becomes completely free — just
+      #    cosine similarity on pre-existing vectors, no API calls at all.
+      #
+      #    If the embedding model changes (OPENAI_EMBEDDING_MODEL in config.py),
+      #    load_corpus() will raise RuntimeError with instructions to re-generate.
+      #    Regenerate locally with:
+      #      $env:AGENT_CORPUS_FILE="tests/fixtures/test_corpus.json"
+      #      python -m agentforge.rag.document_store tests/fixtures/EmployeeHandbook.txt
+      #    Then commit the updated test_corpus.json.
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 2. Set up Python with pip caching
+      # -----------------------------------------------------------------------
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # -----------------------------------------------------------------------
+      # 3. Install production dependencies only
+      #    (No dev deps needed — we're not running unit tests here)
+      # -----------------------------------------------------------------------
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # -----------------------------------------------------------------------
+      # 4. Run the full eval suite
+      #
+      #    --eval          → Recall@K  (retrieval quality, no extra API calls)
+      #    --faithfulness  → LLM-as-judge (answer quality, one API call per Q)
+      #
+      #    The evaluation.py script already handles the exit code:
+      #      sys.exit(1) if Recall@K < 0.70 OR faithfulness < 0.80
+      #      sys.exit(0) if both pass
+      #
+      #    GitHub Actions fails the job on exit code 1 — that's the gate.
+      #    A failed eval gate shows up as a red ❌ on the commit in GitHub,
+      #    so it's immediately visible in the repo history.
+      # -----------------------------------------------------------------------
+      - name: Run evaluation suite
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AGENT_CORPUS_FILE: tests/fixtures/test_corpus.json
+        run: |
+          echo "=============================================="
+          echo " Running AI quality gate"
+          echo " Thresholds: Recall@5 ≥ 70% | Faithfulness ≥ 80%"
+          echo "=============================================="
+          python -m agentforge.evaluation --eval --faithfulness
+
+      # -----------------------------------------------------------------------
+      # 6. Upload eval results as a build artifact
+      #
+      #    WHY: So you can download and inspect the full per-question results
+      #    without having to re-run the eval. Especially useful when debugging
+      #    a failure — you can see exactly which questions missed which chunks.
+      #
+      #    The eval script prints results to stdout, which GitHub captures in
+      #    the job log. This step uploads the log as a downloadable file.
+      #    Available in: Actions tab → the run → Artifacts section.
+      # -----------------------------------------------------------------------
+      - name: Upload eval results
+        if: always()    # upload even if the eval failed — we want to see WHY
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-${{ github.sha }}
+          path: agent_logs.jsonl
+          retention-days: 30

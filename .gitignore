@@ -31,9 +31,12 @@ corpus.json
 memory.json
 memory/
 
-# Learning docs, roadmaps, eval data — local reference, not part of source
+# Learning docs and roadmaps — local reference only, not part of source
 docs/
-tests/eval_dataset.json
+
+# Test fixtures — intentionally tracked so CI can run the eval suite
+# tests/fixtures/EmployeeHandbook.txt  ← NOT ignored (CI needs it)
+# tests/eval_dataset.json              ← NOT ignored (CI needs it)
 
 # AI assistant context files — local reference, not part of source
 CLAUDE.md
@@ -42,3 +45,6 @@ CLAUDE.md
 .cursor/
 .vscode/
 *.code-workspace
+
+# Claude Code memory — personal session context, not source
+.claude/

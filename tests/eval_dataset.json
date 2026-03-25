@@ -1,0 +1,349 @@
+[
+  {
+    "id": "eval_001",
+    "question": "Where is the SolarTech headquarters located and how do you access it?",
+    "expected_facts": [
+      "located at 4520 Nebula Lane, Seattle",
+      "access requires a Level 2 Biometric scan"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_0"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_002",
+    "question": "What are the rules for the satellite office?",
+    "expected_facts": [
+      "located in Austin, TX",
+      "quiet-only zone",
+      "no voice calls permitted in open areas"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_0"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_003",
+    "question": "What are the core working hours?",
+    "expected_facts": [
+      "10:00 AM to 4:00 PM Core Time",
+      "employees must be online during these hours"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_0"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_004",
+    "question": "How does the Green-Stripe bonus program work?",
+    "expected_facts": [
+      "eligible if commute via electric unicycle or carpool with at least 3 others",
+      "monthly stipend of $150 Solar-Credits",
+      "credits can be redeemed at the cafeteria or for extra PTO",
+      "100 credits equals 1 day of PTO",
+      "credits must be logged in EcoPortal by the 25th of each month"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_0", "EmployeeHandbook_chunk_1"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "medium"
+  },
+  {
+    "id": "eval_005",
+    "question": "What animals are allowed in the office and when?",
+    "expected_facts": [
+      "dogs and domestic cats are allowed",
+      "only on Tuesdays and Thursdays",
+      "no reptiles or birds allowed",
+      "pets must wear a SolarTech Guest lanyard"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_1", "EmployeeHandbook_chunk_2"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "medium"
+  },
+  {
+    "id": "eval_006",
+    "question": "Why are reptiles and birds not allowed in the office?",
+    "expected_facts": [
+      "due to the sensitive HVAC filters in the lab"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_2"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_007",
+    "question": "How much is the professional development budget and what can it be used for?",
+    "expected_facts": [
+      "$3,250 per year per employee",
+      "must be used for technical skills or Future-Tech certifications",
+      "cannot be used for General Management courses",
+      "examples include Quantum Computing and Fusion Maintenance"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_2", "EmployeeHandbook_chunk_3"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "medium"
+  },
+  {
+    "id": "eval_008",
+    "question": "How do I request approval for a training course?",
+    "expected_facts": [
+      "submit request to Manager Sarah",
+      "at least 14 days before the course start date"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_3"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_009",
+    "question": "Where is the 2024 annual retreat and what do I need to bring?",
+    "expected_facts": [
+      "Blue Ridge Crater in Arizona",
+      "must bring own reusable Hydro-Flask",
+      "Company-issued Model X-1"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_3"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_010",
+    "question": "What is the Sun-Sync leave policy?",
+    "expected_facts": [
+      "2 days per year",
+      "specifically for use during a Total Solar Eclipse or verified Aurora Borealis event"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_3", "EmployeeHandbook_chunk_4"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "medium"
+  },
+  {
+    "id": "eval_011",
+    "question": "What is the parental leave policy and how does re-entry work?",
+    "expected_facts": [
+      "16 weeks of fully paid leave",
+      "re-entry requires a Sync-Up week",
+      "employee works only 10 hours at full pay during Sync-Up week"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_4"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_012",
+    "question": "What equipment do new employees receive?",
+    "expected_facts": [
+      "Solar-Pad Pro",
+      "Neural-Link headset which is optional"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_4", "EmployeeHandbook_chunk_5"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "medium"
+  },
+  {
+    "id": "eval_013",
+    "question": "What is the home office stipend and are there any rules about treadmill desks?",
+    "expected_facts": [
+      "one-time $1,200 grant for ergonomic furniture",
+      "treadmill desks are encouraged",
+      "must be under 65 decibels"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_5"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_014",
+    "question": "What happens if I lose company hardware?",
+    "expected_facts": [
+      "15% Solar-Credit penalty",
+      "penalty waived with a police report or Act of Nature certificate"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_5"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_015",
+    "question": "What are the email dark hours and what should I do in an emergency?",
+    "expected_facts": [
+      "no internal emails between 7:00 PM and 7:00 AM",
+      "use the Red-Alert Slack channel for emergencies"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_6"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_016",
+    "question": "What is the meeting mute rule?",
+    "expected_facts": [
+      "meetings with more than 8 people",
+      "all microphones must be muted",
+      "unmute only when the Speaker's Prism is assigned to you"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_6"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_017",
+    "question": "What disclaimer is required when using AI to draft client responses?",
+    "expected_facts": [
+      "footer must include Assisted by Solar-Intelligence v2.1"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_6"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_018",
+    "question": "What health and wellness benefits does SolarTech offer?",
+    "expected_facts": [
+      "Light-Therapy pods limited to 20 minutes per session",
+      "10 sessions per year with Mind-Cloud therapists fully covered",
+      "gym subsidy of $80 per month for kinetic-energy-recovery machines"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_7"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "medium"
+  },
+  {
+    "id": "eval_019",
+    "question": "What is the password policy?",
+    "expected_facts": [
+      "16 characters",
+      "changed every 90 days",
+      "biometric overrides permitted at The Hub only"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_7", "EmployeeHandbook_chunk_8"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "medium"
+  },
+  {
+    "id": "eval_020",
+    "question": "What are the guest access rules at the Austin office?",
+    "expected_facts": [
+      "guests must be escorted at all times",
+      "forbidden from entering the Faraday Cage testing room"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_8"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_021",
+    "question": "How much does a cafeteria voucher cost in Solar-Credits and is approval required?",
+    "expected_facts": [
+      "15 credits for a $20 cafeteria voucher",
+      "limit of 5 vouchers per month",
+      "no approval required"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_9"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_022",
+    "question": "What is the travel policy for trips under 300 miles?",
+    "expected_facts": [
+      "must use Hyper-Rail or company-approved EV",
+      "flights only permitted for Level-Red urgent client meetings"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_9", "EmployeeHandbook_chunk_10"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "medium"
+  },
+  {
+    "id": "eval_023",
+    "question": "What is the per diem for meals during travel?",
+    "expected_facts": [
+      "$75 per day for meals",
+      "reduced to $25 per day if hotel provides a Solar-Breakfast"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_10"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_024",
+    "question": "What triggers the Deep-Freeze protocol and what happens?",
+    "expected_facts": [
+      "activated when Seattle HQ temperature drops below 55 degrees F or during city-wide power grid failure",
+      "Level 1 staff must migrate to The Bunker on Floor B2",
+      "all Project Orion files are encrypted"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_10", "EmployeeHandbook_chunk_11"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "medium"
+  },
+  {
+    "id": "eval_025",
+    "question": "How do employees access Project Orion files during a Deep-Freeze?",
+    "expected_facts": [
+      "requires a physical YubiKey 5C",
+      "requires a 12-digit Freeze-Code",
+      "Freeze-Code is in the physical safe in Manager Sarah's office"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_11"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "medium"
+  },
+  {
+    "id": "eval_026",
+    "question": "How should employees communicate if Slack is down during an emergency?",
+    "expected_facts": [
+      "tune to FM Radio 98.2 for status updates"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_11"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_027",
+    "question": "What are the confidentiality rules for Project Orion?",
+    "expected_facts": [
+      "must sign a Neural-NDA",
+      "no personal smartphones within 10 feet of the Plasma-Rig",
+      "can only discuss with Strategic Partners listed in Appendix G",
+      "Blue-Shield VPN must be active for external discussion"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_12"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "medium"
+  },
+  {
+    "id": "eval_028",
+    "question": "What is the maximum hotel rate for business travel and where do I book?",
+    "expected_facts": [
+      "maximum $250 per night",
+      "booking must be done via the Star-Stay portal"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_10"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_029",
+    "question": "How often must equipment be maintained and where?",
+    "expected_facts": [
+      "every 6 months",
+      "brought to the Tech-Bar",
+      "for a Photon-Cleaning"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_5"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "easy"
+  },
+  {
+    "id": "eval_030",
+    "question": "What is Level-Blue data and what restrictions apply to it on mobile?",
+    "expected_facts": [
+      "Level-Blue data refers to Project Orion",
+      "strictly read-only on mobile devices"
+    ],
+    "expected_chunk_ids": ["EmployeeHandbook_chunk_8"],
+    "source": "EmployeeHandbook.txt",
+    "difficulty": "medium"
+  }
+]

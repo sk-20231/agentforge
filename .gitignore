@@ -29,7 +29,7 @@ htmlcov/
 agent_logs.jsonl
 corpus.json
 memory.json
-memory/
+/memory/
 
 # Learning docs and roadmaps — local reference only, not part of source
 docs/

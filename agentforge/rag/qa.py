@@ -15,7 +15,14 @@ from agentforge.rag.document_store import search_docs
 from agentforge.logger import log_event, Span, log_token_usage
 from agentforge.conversation import rewrite_query
 
-client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+_client = None  # created on first API call, not at import time
+
+def _get_client():
+    global _client
+    if _client is None:
+        _client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+    return _client
+
 logger = logging.getLogger(__name__)
 
 
@@ -94,7 +101,7 @@ def _stream_rag_tokens(
       Same reason as _stream_tokens in memory/response.py — keeping the
       generator isolated makes error handling clean and the main function readable.
     """
-    response = client.chat.completions.create(
+    response = _get_client().chat.completions.create(
         model=OPENAI_MODEL,
         messages=messages,
         stream=True,
@@ -210,7 +217,7 @@ def answer_from_docs(
 
     # 4b. Non-streaming path (default) — wait for full response, then guardrail.
     with Span("docs_qa_generate", trace_id=trace_id) as s:
-        response = client.chat.completions.create(
+        response = _get_client().chat.completions.create(
             model=OPENAI_MODEL,
             messages=messages,
         )

@@ -20,7 +20,7 @@ def _make_mock_response(json_content: dict):
     return response
 
 
-@patch("agentforge.main.client")
+@patch("agentforge.main._client")
 def test_classify_intent_remember(mock_client):
     mock_client.chat.completions.create.return_value = _make_mock_response({
         "intent": "REMEMBER",
@@ -33,7 +33,7 @@ def test_classify_intent_remember(mock_client):
     assert "reason" in result
 
 
-@patch("agentforge.main.client")
+@patch("agentforge.main._client")
 def test_classify_intent_act(mock_client):
     mock_client.chat.completions.create.return_value = _make_mock_response({
         "intent": "ACT",
@@ -45,7 +45,7 @@ def test_classify_intent_act(mock_client):
     assert result["memory_candidate"] == ""
 
 
-@patch("agentforge.main.client")
+@patch("agentforge.main._client")
 def test_classify_intent_ignore(mock_client):
     mock_client.chat.completions.create.return_value = _make_mock_response({
         "intent": "IGNORE",
@@ -56,7 +56,7 @@ def test_classify_intent_ignore(mock_client):
     assert result["intent"] == "IGNORE"
 
 
-@patch("agentforge.main.client")
+@patch("agentforge.main._client")
 def test_classify_intent_answer(mock_client):
     mock_client.chat.completions.create.return_value = _make_mock_response({
         "intent": "ANSWER",

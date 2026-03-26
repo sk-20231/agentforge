@@ -7,7 +7,14 @@ import numpy as np
 from agentforge.config import AGENT_MEMORY_DIR, OPENAI_EMBEDDING_MODEL, OPENAI_BASE_URL
 from agentforge.logger import log_event
 
-client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+_client = None  # created on first API call, not at import time
+
+def _get_client():
+    global _client
+    if _client is None:
+        _client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+    return _client
+
 MEMORY_DIR = AGENT_MEMORY_DIR
 os.makedirs(MEMORY_DIR, exist_ok=True)
 
@@ -47,7 +54,7 @@ def get_embedding(text: str):
     if not text or not isinstance(text, str) or not text.strip():
         raise ValueError(f"Invalid input for embedding: {repr(text)}")
     
-    response = client.embeddings.create(
+    response = _get_client().embeddings.create(
         model=OPENAI_EMBEDDING_MODEL,
         input=text.strip()
     )

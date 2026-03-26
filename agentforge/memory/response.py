@@ -9,7 +9,14 @@ from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
 from agentforge.memory.semantic import load_memory
 from agentforge.logger import log_token_usage
 
-client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+_client = None  # created on first API call, not at import time
+
+def _get_client():
+    global _client
+    if _client is None:
+        _client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+    return _client
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,7 +70,7 @@ def answer_with_memory(
         return _stream_tokens(messages, trace_id=trace_id)
 
     try:
-        response = client.chat.completions.create(
+        response = _get_client().chat.completions.create(
             model=OPENAI_MODEL,
             messages=messages,
         )

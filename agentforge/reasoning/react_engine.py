@@ -10,7 +10,14 @@ from agentforge.tools import execute_tool
 from agentforge.memory.semantic import get_relevant_memories, store_memory
 from agentforge.logger import log_event, log_token_usage
 
-client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+_client = None  # created on first API call, not at import time
+
+def _get_client():
+    global _client
+    if _client is None:
+        _client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+    return _client
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,7 +43,7 @@ def react_loop(user_id: str, user_input: str, max_steps: int = 5) -> str:
 
     for step in range(max_steps):
         try:
-            response = client.chat.completions.create(
+            response = _get_client().chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=messages,
                 # Constrained decoding: same as classify_intent (Step 6).

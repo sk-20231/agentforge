@@ -84,7 +84,7 @@ class TestAnswerFromDocs:
     """Tests for the full RAG pipeline with mocked dependencies."""
 
     @patch("agentforge.rag.qa.log_event")
-    @patch("agentforge.rag.qa.client")
+    @patch("agentforge.rag.qa._client")
     @patch("agentforge.rag.qa.search_docs")
     def test_returns_answer_with_valid_citations(self, mock_search, mock_client, mock_log):
         mock_search.return_value = [
@@ -106,7 +106,7 @@ class TestAnswerFromDocs:
         assert "[doc_chunk_1]" in result
 
     @patch("agentforge.rag.qa.log_event")
-    @patch("agentforge.rag.qa.client")
+    @patch("agentforge.rag.qa._client")
     @patch("agentforge.rag.qa.search_docs")
     def test_guardrail_strips_hallucinated_citation(self, mock_search, mock_client, mock_log):
         mock_search.return_value = [
@@ -133,7 +133,7 @@ class TestAnswerFromDocs:
         assert "don't have any documents" in result.lower() or "ingest" in result.lower()
 
     @patch("agentforge.logger.log_event")
-    @patch("agentforge.rag.qa.client")
+    @patch("agentforge.rag.qa._client")
     @patch("agentforge.rag.qa.search_docs")
     def test_logs_retrieval_and_answer(self, mock_search, mock_client, mock_log):
         mock_search.return_value = [
@@ -160,7 +160,7 @@ class TestAnswerFromDocsWithHistory:
     """Tests that conversation history flows into the LLM call for RAG."""
 
     @patch("agentforge.rag.qa.log_event")
-    @patch("agentforge.rag.qa.client")
+    @patch("agentforge.rag.qa._client")
     @patch("agentforge.rag.qa.search_docs")
     def test_history_included_in_llm_messages(self, mock_search, mock_client, mock_log):
         mock_search.return_value = [
@@ -187,7 +187,7 @@ class TestAnswerFromDocsWithHistory:
         assert messages[-1]["content"] == "How does it work?"
 
     @patch("agentforge.rag.qa.log_event")
-    @patch("agentforge.rag.qa.client")
+    @patch("agentforge.rag.qa._client")
     @patch("agentforge.rag.qa.search_docs")
     def test_no_history_backward_compatible(self, mock_search, mock_client, mock_log):
         mock_search.return_value = [

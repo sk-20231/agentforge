@@ -19,7 +19,7 @@ def _make_mock_llm_response(text: str):
     return response
 
 
-@patch("agentforge.memory.response.client")
+@patch("agentforge.memory.response._client")
 def test_answer_with_memory_no_stored_info_returns_llm_reply(mock_client, temp_memory_dir):
     mock_client.chat.completions.create.return_value = _make_mock_llm_response(
         "I don't have any information about you yet."
@@ -29,7 +29,7 @@ def test_answer_with_memory_no_stored_info_returns_llm_reply(mock_client, temp_m
     mock_client.chat.completions.create.assert_called_once()
 
 
-@patch("agentforge.memory.response.client")
+@patch("agentforge.memory.response._client")
 def test_answer_with_memory_injects_stored_facts(mock_client, temp_memory_dir):
     # Pre-populate memory (no embedding needed for this test - we mock the LLM)
     user_id = "user_with_facts"
@@ -57,7 +57,7 @@ def test_answer_with_memory_injects_stored_facts(mock_client, temp_memory_dir):
 # ---------- Conversation history tests ----------
 
 
-@patch("agentforge.memory.response.client")
+@patch("agentforge.memory.response._client")
 def test_history_is_included_in_messages(mock_client, temp_memory_dir):
     """When history is provided, prior turns should appear in the messages list."""
     history = [
@@ -83,7 +83,7 @@ def test_history_is_included_in_messages(mock_client, temp_memory_dir):
     assert messages[-1]["content"] == "Who created it?"
 
 
-@patch("agentforge.memory.response.client")
+@patch("agentforge.memory.response._client")
 def test_no_history_is_backward_compatible(mock_client, temp_memory_dir):
     """When history is None (default), messages should contain only system + user."""
     mock_client.chat.completions.create.return_value = _make_mock_llm_response("Hi!")

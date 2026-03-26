@@ -16,7 +16,7 @@ class TestReactMessageConstruction:
 
     @patch("agentforge.reasoning.react_engine.log_event")
     @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="no memories")
-    @patch("agentforge.reasoning.react_engine.client")
+    @patch("agentforge.reasoning.react_engine._client")
     def test_output_schema_included_in_messages(self, mock_client, mock_mem, mock_log):
         """OUTPUT_SCHEMA must be in messages so response_format=json_object is accepted."""
         final_response = json.dumps({
@@ -42,7 +42,7 @@ class TestReactMessageConstruction:
 
     @patch("agentforge.reasoning.react_engine.log_event")
     @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="no memories")
-    @patch("agentforge.reasoning.react_engine.client")
+    @patch("agentforge.reasoning.react_engine._client")
     def test_json_object_response_format_used(self, mock_client, mock_mem, mock_log):
         """response_format must request json_object for constrained decoding."""
         final_response = json.dumps({
@@ -68,7 +68,7 @@ class TestReactFinalAction:
 
     @patch("agentforge.reasoning.react_engine.log_event")
     @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
-    @patch("agentforge.reasoning.react_engine.client")
+    @patch("agentforge.reasoning.react_engine._client")
     def test_final_action_returns_reply(self, mock_client, mock_mem, mock_log):
         final_response = json.dumps({
             "thought": "I can answer directly.",
@@ -88,7 +88,7 @@ class TestReactFinalAction:
     @patch("agentforge.reasoning.react_engine.store_memory")
     @patch("agentforge.reasoning.react_engine.log_event")
     @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
-    @patch("agentforge.reasoning.react_engine.client")
+    @patch("agentforge.reasoning.react_engine._client")
     def test_final_action_stores_memory_when_flagged(self, mock_client, mock_mem, mock_log, mock_store):
         final_response = json.dumps({
             "thought": "User likes hiking.",
@@ -113,7 +113,7 @@ class TestReactErrorHandling:
 
     @patch("agentforge.reasoning.react_engine.log_event")
     @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
-    @patch("agentforge.reasoning.react_engine.client")
+    @patch("agentforge.reasoning.react_engine._client")
     def test_llm_exception_returns_friendly_error(self, mock_client, mock_mem, mock_log):
         mock_client.chat.completions.create.side_effect = Exception("API error")
 
@@ -123,7 +123,7 @@ class TestReactErrorHandling:
 
     @patch("agentforge.reasoning.react_engine.log_event")
     @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
-    @patch("agentforge.reasoning.react_engine.client")
+    @patch("agentforge.reasoning.react_engine._client")
     def test_invalid_json_returns_error(self, mock_client, mock_mem, mock_log):
         mock_msg = MagicMock()
         mock_msg.content = "not valid json at all"
@@ -137,7 +137,7 @@ class TestReactErrorHandling:
 
     @patch("agentforge.reasoning.react_engine.log_event")
     @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
-    @patch("agentforge.reasoning.react_engine.client")
+    @patch("agentforge.reasoning.react_engine._client")
     def test_max_steps_exceeded(self, mock_client, mock_mem, mock_log):
         """If the model never returns action.type='final', loop should stop at max_steps."""
         tool_response = json.dumps({

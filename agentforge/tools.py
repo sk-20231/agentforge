@@ -13,7 +13,13 @@ from agentforge.logger import log_event, log_token_usage
 
 logger = logging.getLogger(__name__)
 
-client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+_client = None  # created on first API call, not at import time
+
+def _get_client():
+    global _client
+    if _client is None:
+        _client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+    return _client
 
 # -------------------- SAFE MATH EVAL --------------------
 
@@ -182,7 +188,7 @@ def run_llm_with_tools(user_id: str, user_input: str, trace_id: str = None) -> s
     and returns the FINAL model output as a raw JSON string.
     """
     try:
-        response = client.chat.completions.create(
+        response = _get_client().chat.completions.create(
             model=OPENAI_MODEL,
             messages=build_messages(user_id, user_input),
             tools=TOOLS_SCHEMA,

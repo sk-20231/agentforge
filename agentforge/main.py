@@ -18,12 +18,18 @@ from agentforge.logger import log_event, generate_trace_id, Span, log_token_usag
 from agentforge.reasoning.react_engine import react_loop
 from agentforge.conversation import trim_history, count_tokens
 
-client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+_client = None  # created on first API call, not at import time
+
+def _get_client():
+    global _client
+    if _client is None:
+        _client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+    return _client
 
 
 def simple_llm_answer(user_input: str, trace_id: str = None) -> str:
     """Non-streaming LLM call. Returns the full response as a single string."""
-    response = client.chat.completions.create(
+    response = _get_client().chat.completions.create(
         model=OPENAI_MODEL,
         messages=[{"role": "user", "content": user_input}],
     )
@@ -41,7 +47,7 @@ def stream_llm_answer(user_input: str, trace_id: str = None) -> Iterator[str]:
     Each chunk's delta.content is one token (or None on the final sentinel
     chunk, which we skip with the `if token` guard).
     """
-    response = client.chat.completions.create(
+    response = _get_client().chat.completions.create(
         model=OPENAI_MODEL,
         messages=[{"role": "user", "content": user_input}],
         stream=True,
@@ -228,7 +234,7 @@ Respond with a JSON object with exactly these keys:
 """
 
     try:
-        response = client.chat.completions.create(
+        response = _get_client().chat.completions.create(
             model=OPENAI_MODEL,
             messages=[{"role": "user", "content": prompt}],
             # Constrained decoding: the API enforces valid JSON at the token level.

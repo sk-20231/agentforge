@@ -64,7 +64,13 @@ def validate_against_corpus(dataset: list[dict], corpus_path: str = None) -> dic
 
     corpus_path = corpus_path or AGENT_CORPUS_FILE
     with open(corpus_path, encoding="utf-8") as f:
-        corpus = json.load(f)
+        data = json.load(f)
+
+    # Handle new format: {"embedding_model": "...", "chunks": [...]}
+    if isinstance(data, dict):
+        corpus = data.get("chunks", [])
+    else:
+        corpus = data
 
     corpus_ids = {c["id"] for c in corpus}
     missing = []

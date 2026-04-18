@@ -20,7 +20,7 @@ from agentforge.config import OPENAI_BASE_URL, OPENAI_MODEL
 from agentforge.logger import log_event, log_token_usage
 from agentforge.memory.semantic import get_relevant_memories
 from agentforge.prompts import MEMORY_INSTRUCTIONS, OUTPUT_SCHEMA, SYSTEM_PROMPT
-from agentforge.tools import weather, wikipedia
+from agentforge.tools import news, weather, wikipedia
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ def _get_client():
 
 # -------------------- TOOL REGISTRY --------------------
 # Register every tool module here. Each must export TOOL_FUNCTION + TOOL_SCHEMA.
-TOOL_MODULES = [wikipedia, weather]
+TOOL_MODULES = [wikipedia, weather, news]
 
 TOOL_REGISTRY: Dict[str, Callable] = {
     m.TOOL_FUNCTION.__name__: m.TOOL_FUNCTION for m in TOOL_MODULES
@@ -47,6 +47,7 @@ TOOLS_SCHEMA = [m.TOOL_SCHEMA for m in TOOL_MODULES]
 # Re-export individual tool functions so existing imports keep working.
 wikipedia_lookup = wikipedia.wikipedia_lookup
 get_weather = weather.get_weather
+get_top_news = news.get_top_news
 
 
 # -------------------- PROMPT BUILDER --------------------

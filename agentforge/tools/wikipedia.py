@@ -9,6 +9,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from agentforge.tools._safety import sanitize_text, wrap_untrusted
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,7 +34,11 @@ def wikipedia_lookup(topic: str) -> str:
         if not extract:
             return f"No summary available for '{topic}'"
 
-        return f"{title}: {extract}"
+        # Wikipedia content is user-editable — sanitize + wrap before passing
+        # to the LLM so any injection attempt in the article is treated as data.
+        clean_title = sanitize_text(title, 200)
+        clean_extract = sanitize_text(extract, 1500)
+        return wrap_untrusted(f"{clean_title}: {clean_extract}", source="Wikipedia")
 
     except urllib.error.HTTPError as e:
         if e.code == 404:

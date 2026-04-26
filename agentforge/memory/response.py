@@ -87,7 +87,7 @@ def _stream_tokens(messages: list[dict], trace_id: str = None) -> Iterator[str]:
     if the API call itself fails, the exception propagates to the CLI which
     catches it; if a mid-stream chunk is malformed, we skip it and continue.
     """
-    response = client.chat.completions.create(
+    response = _get_client().chat.completions.create(
         model=OPENAI_MODEL,
         messages=messages,
         stream=True,

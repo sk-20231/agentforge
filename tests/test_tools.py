@@ -10,6 +10,7 @@ from agentforge.tools import (
     execute_tool,
     get_top_news,
     get_weather,
+    tool_catalog_for_classifier,
     wikipedia_lookup,
 )
 
@@ -29,6 +30,30 @@ class TestToolRegistry:
     def test_registry_entries_are_callable(self):
         for name, func in TOOL_REGISTRY.items():
             assert callable(func), f"{name} is not callable"
+
+
+class TestToolCatalogForClassifier:
+    """The classifier prompt sources its tool list from this helper, so any
+    tool added to TOOL_MODULES must surface here automatically."""
+
+    def test_includes_every_registered_tool(self):
+        catalog = tool_catalog_for_classifier()
+        for name in TOOL_REGISTRY.keys():
+            assert name in catalog, f"{name} missing from classifier catalog"
+
+    def test_includes_descriptions(self):
+        catalog = tool_catalog_for_classifier()
+        # descriptions should be non-trivial (more than just the tool name)
+        for line in catalog.splitlines():
+            assert ":" in line, f"line missing description separator: {line!r}"
+            _name, _, desc = line.strip().lstrip("-").strip().partition(":")
+            assert desc.strip(), f"empty description for line: {line!r}"
+
+    def test_no_calculator_drift(self):
+        # Calculator was removed in Session 5; the classifier prompt previously
+        # referenced "calculation" — this test guards against that drift.
+        catalog = tool_catalog_for_classifier().lower()
+        assert "calculator" not in catalog
 
 
 class TestExecuteTool:

@@ -44,6 +44,21 @@ TOOL_REGISTRY: Dict[str, Callable] = {
 
 TOOLS_SCHEMA = [m.TOOL_SCHEMA for m in TOOL_MODULES]
 
+
+def tool_catalog_for_classifier() -> str:
+    """Render the registered tools as a bullet list for the intent classifier.
+
+    Single source of truth: tool name + description live in each tool module's
+    TOOL_SCHEMA. The classifier reads from here, so adding a tool to
+    TOOL_MODULES updates the classifier prompt automatically — no drift.
+    """
+    lines = []
+    for m in TOOL_MODULES:
+        fn = m.TOOL_SCHEMA["function"]
+        lines.append(f"    - {fn['name']}: {fn['description']}")
+    return "\n".join(lines)
+
+
 # Re-export individual tool functions so existing imports keep working.
 wikipedia_lookup = wikipedia.wikipedia_lookup
 get_weather = weather.get_weather

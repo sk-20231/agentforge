@@ -5,7 +5,12 @@ from openai import OpenAI
 import json
 
 from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL, HISTORY_TOKEN_BUDGET
-from agentforge.tools import run_llm_with_tools, TOOLS_SCHEMA, execute_tool
+from agentforge.tools import (
+    run_llm_with_tools,
+    TOOLS_SCHEMA,
+    execute_tool,
+    tool_catalog_for_classifier,
+)
 from agentforge.memory.semantic import (
     load_memory,
     save_memory,
@@ -194,15 +199,28 @@ def classify_intent(user_input: str, trace_id: str = None) -> dict:
     # response_format={"type": "json_object"} enforces that at the API level.
     # The prompt still describes the expected keys and value constraints because
     # structured output guarantees valid JSON but NOT the right shape or values.
+    # The available tools are injected dynamically from the tool registry so
+    # adding/removing a tool updates the classifier with no prompt edit needed.
+    available_tools = tool_catalog_for_classifier()
     prompt = f"""
 You are an intent classifier for an AI agent.
 
 Classify the user's intent into ONE of the following:
 - REMEMBER → stable personal preference or fact
-- ACT → requires a tool or calculation
+- ACT → user wants live, current, real-time, or external information (or a deterministic
+  action) that one of the registered tools below can provide. Route here whenever the
+  honest answer would be "the model can't know that without an external lookup".
+  Available tools:
+{available_tools}
+  ACT examples:
+  - "what's the weather in Tokyo" → get_weather (live data, model doesn't know)
+  - "latest news about OpenAI" → get_top_news (current events)
+  - "who is Ada Lovelace" → wikipedia_lookup (factual entity lookup)
 - REACT → complex tasks requiring reasoning, planning, decomposition, or multiple steps
   Examples: planning a trip, scheduling tasks, comparing options, multi-step problem solving
-- ANSWER → informational response only
+- ANSWER → informational response answerable from the model's own knowledge
+  (history, definitions, explanations). Do NOT use ANSWER if the query needs
+  current/real-time data — use ACT instead.
 - IGNORE → greetings or small talk
 - RESPOND_WITH_MEMORY → answer should use previously stored personal information
 - DOCS_QA → user wants an answer from uploaded/ingested documents (e.g. "what does the document say about X", "according to the docs", "search my files for")

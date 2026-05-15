@@ -2,6 +2,7 @@
 openai>=1.0.0
 numpy>=1.24.0
 streamlit>=1.30.0
+mcp[cli]>=1.0.0
 
 # Optional: load .env from project root (agent/config.py will use it if installed)
 python-dotenv>=1.0.0

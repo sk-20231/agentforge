@@ -39,14 +39,6 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _connected_session():
-    """Async context manager: yields an initialised ClientSession."""
-    async with stdio_client(_params()) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            yield session
-
-
 # ---------------------------------------------------------------------------
 # tests
 # ---------------------------------------------------------------------------

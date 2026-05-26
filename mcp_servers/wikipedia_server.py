@@ -8,7 +8,10 @@ mcp = FastMCP("wikipedia-server")
 @mcp.tool()
 def search_wikipedia(topic: str) -> str:
     """Look up a topic on Wikipedia and return a short summary."""
-    return wikipedia_lookup(topic)
+    result = wikipedia_lookup(topic)
+    if not result.startswith("<untrusted_data"):
+        raise ValueError(result)
+    return result
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # AgentForge
 
-> A production-style AI agent built from primitives — no LangChain, no LlamaIndex, no framework magic. Intent routing, RAG with citation guardrails, ReAct reasoning, evaluation gating in CI, cost tracking, and trace observability — all implemented directly against the OpenAI API.
+> An AI agent built from primitives — no LangChain, no LlamaIndex, no framework magic. Intent routing, RAG with citation guardrails, ReAct reasoning, evaluation gating in CI, cost tracking, and trace observability — all implemented directly against the OpenAI API.
 
 ![CI](https://github.com/sk-20231/agentforge/actions/workflows/ci.yml/badge.svg)
 ![Eval Gate](https://github.com/sk-20231/agentforge/actions/workflows/eval.yml/badge.svg)

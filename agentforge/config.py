@@ -26,3 +26,12 @@ AGENT_CORPUS_FILE = os.environ.get("AGENT_CORPUS_FILE", "corpus.json")
 # Conservative default leaves room for system prompts + RAG chunks (which can
 # consume 1,000–2,000 tokens on DOCS_QA calls) within most model context windows.
 HISTORY_TOKEN_BUDGET = int(os.environ.get("HISTORY_TOKEN_BUDGET", "2000"))
+
+# MCP Servers — paths to MCP server scripts the agent connects to at runtime
+# to discover and call tools. Add a new entry here when a new MCP server is built.
+# Tool names are NOT listed here; they are discovered via tools/list at runtime.
+from pathlib import Path as _Path
+_REPO_ROOT = _Path(__file__).parent.parent
+MCP_SERVERS: list = [
+    str(_REPO_ROOT / "mcp_servers" / "wikipedia_server.py"),
+]

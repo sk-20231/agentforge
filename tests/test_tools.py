@@ -3,13 +3,15 @@ Unit tests for agentforge.tools: tool registry, execute_tool, wikipedia_lookup.
 """
 import json
 import urllib.error
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from agentforge.tools import (
     TOOL_REGISTRY,
+    _mcp_tool_to_openai_schema,
     execute_tool,
     get_top_news,
     get_weather,
+    run_llm_with_tools,
     tool_catalog_for_classifier,
     wikipedia_lookup,
 )
@@ -333,3 +335,179 @@ class TestNews:
     def test_empty_topic_returns_error(self):
         result = get_top_news("")
         assert "Error" in result
+
+
+# ---------------------------------------------------------------------------
+# MCP integration (Step 17b)
+# ---------------------------------------------------------------------------
+
+def _make_mcp_tool(name, description="A tool", input_schema=None):
+    tool = MagicMock()
+    tool.name = name
+    tool.description = description
+    tool.inputSchema = input_schema or {
+        "type": "object",
+        "properties": {"topic": {"type": "string"}},
+        "required": ["topic"],
+    }
+    return tool
+
+
+def _make_session_mock(tools, call_text="<untrusted_data>result</untrusted_data>"):
+    """Return a mock ClientSession with list_tools and call_tool pre-configured."""
+    session = AsyncMock()
+    session.initialize = AsyncMock()
+
+    list_result = MagicMock()
+    list_result.tools = tools
+    session.list_tools = AsyncMock(return_value=list_result)
+
+    content = MagicMock()
+    content.text = call_text
+    call_result = MagicMock()
+    call_result.isError = False
+    call_result.content = [content]
+    session.call_tool = AsyncMock(return_value=call_result)
+
+    return session
+
+
+def _patch_mcp_transport(session_mock):
+    """Return context-manager patches for stdio_client + ClientSession."""
+    stdio_cm = MagicMock()
+    stdio_cm.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
+    stdio_cm.__aexit__ = AsyncMock(return_value=None)
+    mock_stdio = MagicMock(return_value=stdio_cm)
+
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session_mock)
+    session_cm.__aexit__ = AsyncMock(return_value=None)
+    mock_cs = MagicMock(return_value=session_cm)
+
+    return mock_stdio, mock_cs
+
+
+class TestMcpToolSchemaConversion:
+    """_mcp_tool_to_openai_schema converts MCP tool defs to OpenAI format."""
+
+    def test_shape_is_correct(self):
+        tool = _make_mcp_tool("search_wikipedia", "Search Wikipedia for a topic")
+        schema = _mcp_tool_to_openai_schema(tool)
+        assert schema["type"] == "function"
+        assert schema["function"]["name"] == "search_wikipedia"
+        assert schema["function"]["description"] == "Search Wikipedia for a topic"
+        assert schema["function"]["parameters"]["properties"]["topic"]["type"] == "string"
+
+    def test_missing_description_becomes_empty_string(self):
+        tool = _make_mcp_tool("no_desc", description=None)
+        schema = _mcp_tool_to_openai_schema(tool)
+        assert schema["function"]["description"] == ""
+
+
+class TestMcpToolRouting:
+    """run_llm_with_tools routes MCP-registered tools through the MCP session."""
+
+    def _openai_mock(self, tool_name, tool_args, final_content):
+        """Build a mock OpenAI client with two canned responses."""
+        tool_call = MagicMock()
+        tool_call.id = "call_test"
+        tool_call.function.name = tool_name
+        tool_call.function.arguments = json.dumps(tool_args)
+
+        first_msg = MagicMock()
+        first_msg.tool_calls = [tool_call]
+
+        first_resp = MagicMock()
+        first_resp.choices[0].message = first_msg
+        first_resp.usage = MagicMock()
+
+        second_msg = MagicMock()
+        second_msg.tool_calls = None
+        second_msg.content = final_content
+
+        second_resp = MagicMock()
+        second_resp.choices[0].message = second_msg
+        second_resp.usage = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = [first_resp, second_resp]
+        return mock_client
+
+    @patch("agentforge.tools.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.tools.log_event")
+    @patch("agentforge.tools.log_token_usage")
+    @patch("agentforge.tools.get_relevant_memories", return_value="")
+    def test_mcp_tool_is_routed_through_session(self, _mem, _usage, _log):
+        session = _make_session_mock([_make_mcp_tool("search_wikipedia")])
+        mock_stdio, mock_cs = _patch_mcp_transport(session)
+
+        with patch("agentforge.tools.stdio_client", mock_stdio), \
+             patch("agentforge.tools.ClientSession", mock_cs), \
+             patch("agentforge.tools._get_client",
+                   return_value=self._openai_mock(
+                       "search_wikipedia",
+                       {"topic": "Python"},
+                       '{"reply": "Python info", "store_memory": false, "memory_text": ""}',
+                   )):
+            run_llm_with_tools("user1", "Tell me about Python")
+
+        # The MCP session's call_tool must have been used — not local TOOL_REGISTRY
+        session.call_tool.assert_called_once_with("search_wikipedia", {"topic": "Python"})
+
+    @patch("agentforge.tools.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.tools.log_event")
+    @patch("agentforge.tools.log_token_usage")
+    @patch("agentforge.tools.get_relevant_memories", return_value="")
+    def test_local_tool_not_affected_by_mcp_config(self, _mem, _usage, _log):
+        # MCP server is configured but LLM picks a local tool (get_weather).
+        # The MCP session should NOT be called for local tools.
+        session = _make_session_mock([_make_mcp_tool("search_wikipedia")])
+        mock_stdio, mock_cs = _patch_mcp_transport(session)
+
+        with patch("agentforge.tools.stdio_client", mock_stdio), \
+             patch("agentforge.tools.ClientSession", mock_cs), \
+             patch("agentforge.tools._get_client",
+                   return_value=self._openai_mock(
+                       "get_weather",
+                       {"city": "Tokyo"},
+                       '{"reply": "Sunny.", "store_memory": false, "memory_text": ""}',
+                   )), \
+             patch("agentforge.tools.weather.urllib.request.urlopen") as mock_url:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps({"results": []}).encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_url.return_value = mock_resp
+
+            run_llm_with_tools("user1", "What's the weather in Tokyo?")
+
+        session.call_tool.assert_not_called()
+
+    @patch("agentforge.tools.MCP_SERVERS", ["bad/server.py"])
+    @patch("agentforge.tools.log_event")
+    @patch("agentforge.tools.log_token_usage")
+    @patch("agentforge.tools.get_relevant_memories", return_value="")
+    def test_mcp_discovery_failure_does_not_crash(self, _mem, _usage, _log):
+        # Simulate subprocess failing to start — agent should still work with local tools.
+        stdio_cm = MagicMock()
+        stdio_cm.__aenter__ = AsyncMock(side_effect=OSError("No such file"))
+        stdio_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_stdio = MagicMock(return_value=stdio_cm)
+
+        with patch("agentforge.tools.stdio_client", mock_stdio), \
+             patch("agentforge.tools._get_client",
+                   return_value=self._openai_mock(
+                       "get_weather",
+                       {"city": "Paris"},
+                       '{"reply": "Rainy.", "store_memory": false, "memory_text": ""}',
+                   )), \
+             patch("agentforge.tools.weather.urllib.request.urlopen") as mock_url:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps({"results": []}).encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_url.return_value = mock_resp
+
+            result = run_llm_with_tools("user1", "What's the weather in Paris?")
+
+        assert result is not None

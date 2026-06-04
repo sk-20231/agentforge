@@ -31,6 +31,13 @@ corpus.json
 memory.json
 /memory/
 
+# Local test scratch — files generated for manual/edge-case testing only.
+# These are never part of source and must not reach the public repo.
+dinosaurs.md
+verify_*.py
+diag_*.py
+scratch_*
+
 # Learning docs and roadmaps — local reference only, not part of source
 docs/
 

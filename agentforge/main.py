@@ -7,8 +7,6 @@ import json
 from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL, HISTORY_TOKEN_BUDGET
 from agentforge.tools import (
     run_llm_with_tools,
-    TOOLS_SCHEMA,
-    execute_tool,
     tool_catalog_for_classifier,
 )
 from agentforge.memory.semantic import (

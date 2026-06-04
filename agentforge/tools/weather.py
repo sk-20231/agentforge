@@ -13,6 +13,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from agentforge.tools._safety import sanitize_text, wrap_untrusted
+
 logger = logging.getLogger(__name__)
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
@@ -112,7 +114,14 @@ def get_weather(city: str) -> str:
         temp_f = _c_to_f(temp_c)
         wind_str = f", wind {round(wind)} km/h" if wind is not None else ""
 
-        return f"{display}: {round(temp_c)}°C ({temp_f}°F), {description}{wind_str}"
+        # The city display name comes from the external geocoding API, so it is
+        # untrusted text. Sanitize it and wrap the whole summary as untrusted_data
+        # so every MCP-backed tool follows one uniform rule (Step 17c.1): a
+        # successful result is always <untrusted_data>-wrapped; anything else is
+        # an error the server turns into isError:true.
+        clean_display = sanitize_text(display, 100)
+        summary = f"{clean_display}: {round(temp_c)}°C ({temp_f}°F), {description}{wind_str}"
+        return wrap_untrusted(summary, source="open-meteo")
 
     except urllib.error.HTTPError as e:
         return f"Weather API error (HTTP {e.code}) for '{city}'"

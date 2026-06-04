@@ -11,6 +11,7 @@ from agentforge.tools import (
     execute_tool,
     get_top_news,
     get_weather,
+    prime_tool_catalog,
     run_llm_with_tools,
     tool_catalog_for_classifier,
     wikipedia_lookup,
@@ -35,13 +36,15 @@ class TestToolRegistry:
 
 
 class TestToolCatalogForClassifier:
-    """The classifier prompt sources its tool list from this helper, so any
-    tool added to TOOL_MODULES must surface here automatically."""
+    """The classifier prompt sources its tool list from MCP discovery (Step 17c.1),
+    cached in _TOOL_CATALOG_CACHE. The autouse conftest fixture seeds that cache, so
+    these assert against the discovered MCP tool names (not the local registry)."""
 
-    def test_includes_every_registered_tool(self):
+    def test_includes_discovered_mcp_tools(self):
         catalog = tool_catalog_for_classifier()
-        for name in TOOL_REGISTRY.keys():
-            assert name in catalog, f"{name} missing from classifier catalog"
+        assert "search_wikipedia" in catalog
+        assert "get_weather" in catalog
+        assert "get_top_news" in catalog
 
     def test_includes_descriptions(self):
         catalog = tool_catalog_for_classifier()
@@ -458,9 +461,10 @@ class TestMcpToolRouting:
     @patch("agentforge.tools.log_event")
     @patch("agentforge.tools.log_token_usage")
     @patch("agentforge.tools.get_relevant_memories", return_value="")
-    def test_local_tool_not_affected_by_mcp_config(self, _mem, _usage, _log):
-        # MCP server is configured but LLM picks a local tool (get_weather).
-        # The MCP session should NOT be called for local tools.
+    def test_unknown_tool_is_not_dispatched_locally(self, _mem, _usage, _log):
+        # ACT is MCP-only (Step 17c.1): if the model names a tool that wasn't
+        # discovered from any MCP server, there is NO local fallback — the call
+        # is rejected and the MCP session is never used for it.
         session = _make_session_mock([_make_mcp_tool("search_wikipedia")])
         mock_stdio, mock_cs = _patch_mcp_transport(session)
 
@@ -468,46 +472,68 @@ class TestMcpToolRouting:
              patch("agentforge.tools.ClientSession", mock_cs), \
              patch("agentforge.tools._get_client",
                    return_value=self._openai_mock(
-                       "get_weather",
+                       "get_weather",  # NOT in the discovered registry below
                        {"city": "Tokyo"},
-                       '{"reply": "Sunny.", "store_memory": false, "memory_text": ""}',
-                   )), \
-             patch("agentforge.tools.weather.urllib.request.urlopen") as mock_url:
-            mock_resp = MagicMock()
-            mock_resp.read.return_value = json.dumps({"results": []}).encode()
-            mock_resp.__enter__ = lambda s: s
-            mock_resp.__exit__ = MagicMock(return_value=False)
-            mock_url.return_value = mock_resp
-
+                       '{"reply": "ok", "store_memory": false, "memory_text": ""}',
+                   )):
             run_llm_with_tools("user1", "What's the weather in Tokyo?")
 
+        # Only search_wikipedia was discovered, so the hallucinated get_weather
+        # is not dispatched through the session — and there is no local path.
         session.call_tool.assert_not_called()
 
     @patch("agentforge.tools.MCP_SERVERS", ["bad/server.py"])
     @patch("agentforge.tools.log_event")
     @patch("agentforge.tools.log_token_usage")
     @patch("agentforge.tools.get_relevant_memories", return_value="")
-    def test_mcp_discovery_failure_does_not_crash(self, _mem, _usage, _log):
-        # Simulate subprocess failing to start — agent should still work with local tools.
+    def test_mcp_discovery_failure_returns_graceful_reply(self, _mem, _usage, _log):
+        # Subprocess fails to start → no tools discovered. ACT is MCP-only, so
+        # there is no local fallback: it must return a graceful reply, not crash,
+        # and must not attempt a forced tool call against an empty tool list.
         stdio_cm = MagicMock()
         stdio_cm.__aenter__ = AsyncMock(side_effect=OSError("No such file"))
         stdio_cm.__aexit__ = AsyncMock(return_value=None)
         mock_stdio = MagicMock(return_value=stdio_cm)
 
-        with patch("agentforge.tools.stdio_client", mock_stdio), \
-             patch("agentforge.tools._get_client",
-                   return_value=self._openai_mock(
-                       "get_weather",
-                       {"city": "Paris"},
-                       '{"reply": "Rainy.", "store_memory": false, "memory_text": ""}',
-                   )), \
-             patch("agentforge.tools.weather.urllib.request.urlopen") as mock_url:
-            mock_resp = MagicMock()
-            mock_resp.read.return_value = json.dumps({"results": []}).encode()
-            mock_resp.__enter__ = lambda s: s
-            mock_resp.__exit__ = MagicMock(return_value=False)
-            mock_url.return_value = mock_resp
-
+        with patch("agentforge.tools.stdio_client", mock_stdio):
             result = run_llm_with_tools("user1", "What's the weather in Paris?")
 
-        assert result is not None
+        payload = json.loads(result)
+        assert payload["store_memory"] is False
+        assert "tools available" in payload["reply"].lower()
+
+
+class TestPrimeToolCatalog:
+    """prime_tool_catalog discovers {name, description} per tool from MCP servers
+    and caches them for the classifier (Step 17c.1)."""
+
+    @patch("agentforge.tools.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.tools.log_event")
+    def test_prime_discovers_tool_names_and_descriptions(self, _log, monkeypatch):
+        import agentforge.tools as tools_mod
+
+        session = _make_session_mock(
+            [_make_mcp_tool("search_wikipedia", "Search Wikipedia for a topic")]
+        )
+        mock_stdio, mock_cs = _patch_mcp_transport(session)
+        # Clear the conftest-seeded cache so prime actually runs discovery.
+        monkeypatch.setattr(tools_mod, "_TOOL_CATALOG_CACHE", None)
+
+        with patch("agentforge.tools.stdio_client", mock_stdio), \
+             patch("agentforge.tools.ClientSession", mock_cs):
+            catalog = tools_mod.prime_tool_catalog(force=True)
+
+        names = [t["name"] for t in catalog]
+        assert "search_wikipedia" in names
+        entry = next(t for t in catalog if t["name"] == "search_wikipedia")
+        assert entry["description"] == "Search Wikipedia for a topic"
+
+    @patch("agentforge.tools.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.tools.log_event")
+    def test_prime_is_cached_until_forced(self, _log, monkeypatch):
+        import agentforge.tools as tools_mod
+
+        monkeypatch.setattr(tools_mod, "_TOOL_CATALOG_CACHE", [{"name": "cached", "description": "x"}])
+        # Already primed → returns the cache without spawning anything.
+        result = tools_mod.prime_tool_catalog()
+        assert result == [{"name": "cached", "description": "x"}]

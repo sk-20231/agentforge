@@ -11,11 +11,19 @@ import streamlit as st
 from agentforge.main import run_agent
 from agentforge.rag.document_store import ingest_file, load_corpus
 from agentforge.logger import compute_cost_summary, compute_trace_cost, generate_trace_id
+from agentforge.tools import prime_tool_catalog
 
 logger = logging.getLogger(__name__)
 
 # ── Page config ──────────────────────────────────────────────────────
 st.set_page_config(page_title="AgentForge Chat", page_icon="🤖", layout="centered")
+
+# ── Discover MCP tools once per session (Step 17c.1) ─────────────────
+# Streamlit reruns this script top-to-bottom on every interaction, so guard the
+# (subprocess-spawning) discovery behind a session flag — prime only on first load.
+if "_mcp_primed" not in st.session_state:
+    prime_tool_catalog()
+    st.session_state._mcp_primed = True
 
 # ── Session state defaults ───────────────────────────────────────────
 if "user_id" not in st.session_state:

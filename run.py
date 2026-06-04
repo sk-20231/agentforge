@@ -14,10 +14,14 @@ Streaming behaviour (Step 4):
 """
 from agentforge.main import run_agent
 from agentforge.logger import log_event
+from agentforge.tools import prime_tool_catalog
 
 
 if __name__ == "__main__":
     print("🤖 AI Agent (type 'exit' to quit)\n")
+    # Discover the MCP tool catalog once at startup (Step 17c.1) so the intent
+    # classifier knows the available tools and the cost is paid up front.
+    prime_tool_catalog()
     user_id = input("Enter user id: ").strip()
     session_id = "default"
     history: list[dict] = []

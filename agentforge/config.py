@@ -34,4 +34,6 @@ from pathlib import Path as _Path
 _REPO_ROOT = _Path(__file__).parent.parent
 MCP_SERVERS: list = [
     str(_REPO_ROOT / "mcp_servers" / "wikipedia_server.py"),
+    str(_REPO_ROOT / "mcp_servers" / "weather_server.py"),
+    str(_REPO_ROOT / "mcp_servers" / "news_server.py"),
 ]

@@ -25,6 +25,15 @@ EXPECTED_PROTOCOL_VERSION = "2025-11-25"
 
 SERVER_PATH = str(Path(__file__).parent.parent / "mcp_servers" / "wikipedia_server.py")
 
+# Substrings that mark a transient *upstream* failure (Wikipedia down / rate-
+# limiting) rather than a bug in our code. The success contract test skips on
+# these so an upstream outage doesn't red-fail the build.
+_TRANSIENT_UPSTREAM = ("HTTP 5", "Could not reach", "timed out", "timeout")
+
+
+def _looks_transient(text: str) -> bool:
+    return any(s in text for s in _TRANSIENT_UPSTREAM)
+
 
 def _params() -> StdioServerParameters:
     return StdioServerParameters(command=sys.executable, args=[SERVER_PATH])
@@ -101,8 +110,10 @@ def test_tool_success_wraps_result_as_untrusted():
                 )
 
     result = _run(_run_inner())
-    assert result.isError is False, "Expected isError: false for valid topic"
     text = " ".join(
         c.text for c in result.content if hasattr(c, "text")
     )
+    if result.isError and _looks_transient(text):
+        pytest.skip(f"Wikipedia upstream unavailable, not a code failure: {text}")
+    assert result.isError is False, "Expected isError: false for valid topic"
     assert "<untrusted_data" in text, "Result must be wrapped in <untrusted_data> tag"

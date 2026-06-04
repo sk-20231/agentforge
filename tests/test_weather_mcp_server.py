@@ -15,8 +15,18 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+
+# Substrings that mark a transient *upstream* failure (the third-party API is
+# down / rate-limiting), as opposed to a bug in our code. The success contract
+# test skips on these so an open-meteo outage doesn't red-fail the build.
+_TRANSIENT_UPSTREAM = ("HTTP 5", "Could not reach", "timed out", "timeout")
+
+
+def _looks_transient(text: str) -> bool:
+    return any(s in text for s in _TRANSIENT_UPSTREAM)
 
 # Pin the protocol version negotiated by the installed SDK. If an SDK upgrade
 # changes the negotiated version this test fails loudly — review before bumping.
@@ -88,6 +98,8 @@ def test_tool_success_wraps_result_as_untrusted():
                 return await session.call_tool("get_weather", {"city": "Tokyo"})
 
     result = _run(_run_inner())
-    assert result.isError is False, "Expected isError: false for a real city"
     text = " ".join(c.text for c in result.content if hasattr(c, "text"))
+    if result.isError and _looks_transient(text):
+        pytest.skip(f"open-meteo upstream unavailable, not a code failure: {text}")
+    assert result.isError is False, "Expected isError: false for a real city"
     assert "<untrusted_data" in text, "Result must be wrapped in <untrusted_data> tag"

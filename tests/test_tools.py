@@ -537,3 +537,22 @@ class TestPrimeToolCatalog:
         # Already primed → returns the cache without spawning anything.
         result = tools_mod.prime_tool_catalog()
         assert result == [{"name": "cached", "description": "x"}]
+
+    def test_empty_catalog_triggers_rediscovery(self, monkeypatch):
+        """Regression (bug #2): an empty cache means a previous discovery found
+        nothing (transient failure at startup). The classifier must re-discover
+        on the next call, not stay blind to every tool for the whole session."""
+        import agentforge.tools as tools_mod
+
+        monkeypatch.setattr(tools_mod, "_TOOL_CATALOG_CACHE", [])  # failed startup discovery
+        calls = {"n": 0}
+
+        def fake_prime(force=False):
+            calls["n"] += 1
+            tools_mod._TOOL_CATALOG_CACHE = [{"name": "recovered_tool", "description": "back online"}]
+            return tools_mod._TOOL_CATALOG_CACHE
+
+        monkeypatch.setattr(tools_mod, "prime_tool_catalog", fake_prime)
+        out = tools_mod.tool_catalog_for_classifier()
+        assert calls["n"] == 1, "empty cache must trigger re-discovery"
+        assert "recovered_tool" in out

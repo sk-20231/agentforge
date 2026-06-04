@@ -73,9 +73,16 @@ def tool_catalog_for_classifier() -> str:
 
     The catalog is primed once at startup (prime_tool_catalog). If something
     calls this before priming, we prime lazily on first use.
+
+    Recovery: we re-discover when the cache is None OR empty. An empty cache
+    means a previous discovery found nothing — usually a transient failure at
+    startup (servers/network briefly down). Re-discovering on the next call lets
+    the agent recover once the servers are reachable, instead of staying blind to
+    every tool for the rest of the session. (If MCP_SERVERS is genuinely empty,
+    the retry is cheap — there are no subprocesses to spawn.)
     """
-    if _TOOL_CATALOG_CACHE is None:
-        prime_tool_catalog()
+    if not _TOOL_CATALOG_CACHE:  # None or [] -> (re)discover
+        prime_tool_catalog(force=True)
     return "\n".join(
         f"    - {t['name']}: {t['description']}" for t in _TOOL_CATALOG_CACHE
     )

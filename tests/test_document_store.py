@@ -8,7 +8,14 @@ import json
 import pytest
 from unittest.mock import patch, MagicMock
 
-from agentforge.rag.document_store import chunk_text, search_docs, load_corpus, save_corpus, list_sources
+from agentforge.rag.document_store import (
+    add_document,
+    chunk_text,
+    list_sources,
+    load_corpus,
+    save_corpus,
+    search_docs,
+)
 
 
 # ---------- chunk_text (pure, no mocks) ----------
@@ -160,6 +167,48 @@ class TestCorpusPersistence:
         assert "embedding_model" in raw
         assert "chunks" in raw
         assert len(raw["chunks"]) == 1
+
+
+# ---------- add_document (idempotent re-ingest) ----------
+
+class TestAddDocumentReingest:
+    """Regression (bug #3): re-ingesting a document must REPLACE its previous
+    chunks, not append duplicates with the same ids."""
+
+    @patch("agentforge.rag.document_store.log_event")
+    @patch("agentforge.rag.document_store.get_embedding")
+    def test_reingest_replaces_not_duplicates(self, mock_emb, _log, tmp_path, monkeypatch):
+        path = str(tmp_path / "corpus.json")
+        monkeypatch.setattr("agentforge.rag.document_store.AGENT_CORPUS_FILE", path)
+        mock_emb.return_value = [0.1, 0.2, 0.3]
+
+        text = "First paragraph here.\n\nSecond paragraph here."
+        n1 = add_document("notes", text, "notes.md")
+        first = load_corpus()
+        n2 = add_document("notes", text, "notes.md")  # same doc again
+        second = load_corpus()
+
+        assert n1 == n2
+        assert len(first) == len(second), "re-ingest must not grow the corpus"
+        ids = [c["id"] for c in second]
+        assert len(ids) == len(set(ids)), "no duplicate chunk ids after re-ingest"
+
+    @patch("agentforge.rag.document_store.log_event")
+    @patch("agentforge.rag.document_store.get_embedding")
+    def test_reingest_only_replaces_same_doc(self, mock_emb, _log, tmp_path, monkeypatch):
+        path = str(tmp_path / "corpus.json")
+        monkeypatch.setattr("agentforge.rag.document_store.AGENT_CORPUS_FILE", path)
+        mock_emb.return_value = [0.1, 0.2, 0.3]
+
+        add_document("docA", "Alpha content.", "a.md")
+        add_document("docB", "Beta content.", "b.md")
+        add_document("docA", "Alpha content updated.", "a.md")  # re-ingest A only
+
+        corpus = load_corpus()
+        sources = {c["source"] for c in corpus}
+        assert "b.md" in sources, "re-ingesting A must not remove B's chunks"
+        a_chunks = [c for c in corpus if c["id"].startswith("docA_chunk_")]
+        assert any("updated" in c["text"] for c in a_chunks), "A's chunks should be the new version"
 
 
 # ---------- search_docs (mocked embedding + corpus) ----------

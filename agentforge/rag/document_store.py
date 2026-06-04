@@ -10,6 +10,7 @@ import sys
 
 from agentforge.config import AGENT_CORPUS_FILE, OPENAI_EMBEDDING_MODEL
 from agentforge.memory.semantic import get_embedding, cosine_similarity
+from agentforge.logger import log_event
 
 
 # ---------- Corpus shape ----------
@@ -145,8 +146,11 @@ def save_corpus(corpus: list[dict]) -> None:
 
 def add_document(doc_id: str, text: str, source: str) -> int:
     """
-    Chunk the text, embed each chunk (via get_embedding), append items to the
+    Chunk the text, embed each chunk (via get_embedding), add the items to the
     corpus, and save. This is the ingest step of RAG: raw text -> searchable chunks.
+
+    Idempotent: if the corpus already contains chunks for this doc_id, they are
+    replaced (not duplicated), so re-ingesting the same file is safe.
 
     Args:
         doc_id: Unique identifier for this document (used as prefix for chunk ids).
@@ -161,6 +165,18 @@ def add_document(doc_id: str, text: str, source: str) -> int:
         return 0
 
     corpus = load_corpus()
+
+    # Idempotent ingest: re-ingesting the same document REPLACES its previous
+    # chunks rather than appending duplicates. Chunk ids are prefixed with the
+    # doc_id, so drop any existing chunk belonging to this doc before adding the
+    # fresh set. Without this, ingesting a file twice doubled the corpus with
+    # duplicate ids — polluting retrieval and citations.
+    prefix = f"{doc_id}_chunk_"
+    existing = sum(1 for c in corpus if c.get("id", "").startswith(prefix))
+    if existing:
+        corpus = [c for c in corpus if not c.get("id", "").startswith(prefix)]
+        log_event("doc_reingest_replaced", {"doc_id": doc_id, "removed_chunks": existing})
+
     for i, chunk in enumerate(chunks):
         embedding = get_embedding(chunk)
         corpus.append({

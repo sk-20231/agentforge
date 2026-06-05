@@ -2,13 +2,49 @@
 Unit tests for the ReAct reasoning engine.
 Focuses on message construction and the loop's handling of LLM responses.
 All LLM and memory calls are mocked — no API keys needed.
+
+Step 17c.2: ReAct dispatches tools over MCP. These tests fake the MCP gateway
+(``agentforge.reasoning.react_engine.mcp_gateway``) so no real servers spawn; the
+real-subprocess contract tests live in tests/test_*_mcp_server.py.
 """
+import contextlib
 import json
 from unittest.mock import patch, MagicMock
 
 import pytest
 
 from agentforge.prompts import OUTPUT_SCHEMA
+
+
+# --------------------------- fake MCP gateway ---------------------------
+
+class _FakeGateway:
+    """Stand-in for agentforge.mcp_client.MCPGateway with no subprocesses."""
+
+    def __init__(self, catalog=None, call_result="<untrusted_data>obs</untrusted_data>"):
+        self.catalog = catalog or []
+        self._call_result = call_result
+        self.calls = []  # records (tool_name, tool_input) for assertions
+
+    @property
+    def has_tools(self):
+        return bool(self.catalog)
+
+    async def call(self, tool_name, arguments):
+        self.calls.append((tool_name, arguments))
+        return self._call_result
+
+
+def _fake_gateway_cm(gw):
+    """Return a drop-in replacement for the mcp_gateway async context manager."""
+    @contextlib.asynccontextmanager
+    async def _cm(trace_id=None):
+        yield gw
+    return _cm
+
+
+def _patch_gateway(gw):
+    return patch("agentforge.reasoning.react_engine.mcp_gateway", _fake_gateway_cm(gw))
 
 
 class TestReactMessageConstruction:
@@ -31,7 +67,8 @@ class TestReactMessageConstruction:
         )
 
         from agentforge.reasoning.react_engine import react_loop
-        react_loop("test_user", "Plan a weekend", max_steps=1)
+        with _patch_gateway(_FakeGateway()):
+            react_loop("test_user", "Plan a weekend", max_steps=1)
 
         call_args = mock_client.chat.completions.create.call_args
         messages = call_args.kwargs["messages"]
@@ -57,10 +94,40 @@ class TestReactMessageConstruction:
         )
 
         from agentforge.reasoning.react_engine import react_loop
-        react_loop("test_user", "hello", max_steps=1)
+        with _patch_gateway(_FakeGateway()):
+            react_loop("test_user", "hello", max_steps=1)
 
         call_args = mock_client.chat.completions.create.call_args
         assert call_args.kwargs["response_format"] == {"type": "json_object"}
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="no memories")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_discovered_tool_catalog_is_rendered_in_prompt(self, mock_client, mock_mem, mock_log):
+        """The live tool catalog (not a hardcoded name) must be injected so the
+        model only references tools that are actually served. Regression guard for
+        the stale 'calculator' the prompt used to advertise (Step 17c.2)."""
+        final_response = json.dumps({
+            "thought": "done", "action": {"type": "final"}, "reply": "ok",
+        })
+        mock_msg = MagicMock()
+        mock_msg.content = final_response
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=mock_msg)]
+        )
+
+        gw = _FakeGateway(catalog=[
+            {"name": "search_wikipedia", "description": "Look up a topic",
+             "input_schema": {"properties": {"topic": {"type": "string"}}}},
+        ])
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(gw):
+            react_loop("u1", "who is Ada Lovelace", max_steps=1)
+
+        messages = mock_client.chat.completions.create.call_args.kwargs["messages"]
+        joined = "\n".join(m["content"] for m in messages if m["role"] == "system")
+        assert "search_wikipedia" in joined
+        assert "calculator" not in joined
 
 
 class TestReactFinalAction:
@@ -82,7 +149,8 @@ class TestReactFinalAction:
         )
 
         from agentforge.reasoning.react_engine import react_loop
-        result = react_loop("u1", "Plan a weekend", max_steps=3)
+        with _patch_gateway(_FakeGateway()):
+            result = react_loop("u1", "Plan a weekend", max_steps=3)
         assert result == "Here is your weekend plan!"
 
     @patch("agentforge.reasoning.react_engine.store_memory")
@@ -104,8 +172,78 @@ class TestReactFinalAction:
         )
 
         from agentforge.reasoning.react_engine import react_loop
-        react_loop("u1", "I love hiking", max_steps=1)
+        with _patch_gateway(_FakeGateway()):
+            react_loop("u1", "I love hiking", max_steps=1)
         mock_store.assert_called_once_with("u1", "User enjoys hiking on weekends.")
+
+
+class TestReactToolDispatch:
+    """Verify tool steps are dispatched over MCP (Step 17c.2)."""
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_tool_action_dispatches_through_gateway(self, mock_client, mock_mem, mock_log):
+        """A 'tool' action must call gw.call (MCP), not any local registry, then
+        the observation feeds the next step which finalizes."""
+        tool_step = json.dumps({
+            "thought": "look it up",
+            "action": {"type": "tool", "tool_name": "search_wikipedia", "tool_input": {"topic": "Ada Lovelace"}},
+            "reply": "",
+        })
+        final_step = json.dumps({
+            "thought": "now I can answer",
+            "action": {"type": "final"},
+            "reply": "Ada Lovelace was a mathematician.",
+        })
+        msg1, msg2 = MagicMock(), MagicMock()
+        msg1.content, msg2.content = tool_step, final_step
+        mock_client.chat.completions.create.side_effect = [
+            MagicMock(choices=[MagicMock(message=msg1)]),
+            MagicMock(choices=[MagicMock(message=msg2)]),
+        ]
+
+        gw = _FakeGateway(
+            catalog=[{"name": "search_wikipedia", "description": "Look up a topic",
+                      "input_schema": {"properties": {"topic": {"type": "string"}}}}],
+            call_result="<untrusted_data>Ada Lovelace: a mathematician</untrusted_data>",
+        )
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(gw):
+            result = react_loop("u1", "who is Ada Lovelace", max_steps=3)
+
+        assert gw.calls == [("search_wikipedia", {"topic": "Ada Lovelace"})]
+        assert result == "Ada Lovelace was a mathematician."
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_unknown_tool_observation_is_recoverable(self, mock_client, mock_mem, mock_log):
+        """An unknown tool returns a readable error from the gateway (not a raise),
+        which the loop feeds back as an observation."""
+        tool_step = json.dumps({
+            "thought": "try a tool",
+            "action": {"type": "tool", "tool_name": "calculator", "tool_input": {"x": 1}},
+            "reply": "",
+        })
+        final_step = json.dumps({
+            "thought": "give up on the tool", "action": {"type": "final"}, "reply": "done",
+        })
+        msg1, msg2 = MagicMock(), MagicMock()
+        msg1.content, msg2.content = tool_step, final_step
+        mock_client.chat.completions.create.side_effect = [
+            MagicMock(choices=[MagicMock(message=msg1)]),
+            MagicMock(choices=[MagicMock(message=msg2)]),
+        ]
+
+        # Gateway has the tool catalog but call() returns an unknown-tool error.
+        gw = _FakeGateway(call_result="Error: Unknown tool 'calculator'")
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(gw):
+            result = react_loop("u1", "compute", max_steps=2)
+
+        assert gw.calls == [("calculator", {"x": 1})]
+        assert result == "done"
 
 
 class TestReactErrorHandling:
@@ -118,7 +256,8 @@ class TestReactErrorHandling:
         mock_client.chat.completions.create.side_effect = Exception("API error")
 
         from agentforge.reasoning.react_engine import react_loop
-        result = react_loop("u1", "Plan something", max_steps=1)
+        with _patch_gateway(_FakeGateway()):
+            result = react_loop("u1", "Plan something", max_steps=1)
         assert "error" in result.lower()
 
     @patch("agentforge.reasoning.react_engine.log_event")
@@ -132,17 +271,18 @@ class TestReactErrorHandling:
         )
 
         from agentforge.reasoning.react_engine import react_loop
-        result = react_loop("u1", "Do something", max_steps=1)
+        with _patch_gateway(_FakeGateway()):
+            result = react_loop("u1", "Do something", max_steps=1)
         assert "error" in result.lower() or "Invalid" in result
 
     @patch("agentforge.reasoning.react_engine.log_event")
     @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
     @patch("agentforge.reasoning.react_engine._client")
     def test_max_steps_exceeded(self, mock_client, mock_mem, mock_log):
-        """If the model never returns action.type='final', loop should stop at max_steps."""
+        """If the model never returns action.type='final', loop stops at max_steps."""
         tool_response = json.dumps({
             "thought": "need more info",
-            "action": {"type": "tool", "tool_name": "calculator", "tool_input": {"expression": "1+1"}},
+            "action": {"type": "tool", "tool_name": "search_wikipedia", "tool_input": {"topic": "x"}},
             "reply": "",
         })
         mock_msg = MagicMock()
@@ -151,7 +291,12 @@ class TestReactErrorHandling:
             choices=[MagicMock(message=mock_msg)]
         )
 
-        with patch("agentforge.reasoning.react_engine.execute_tool", return_value="2"):
-            from agentforge.reasoning.react_engine import react_loop
+        gw = _FakeGateway(
+            catalog=[{"name": "search_wikipedia", "description": "Look up a topic",
+                      "input_schema": {"properties": {"topic": {"type": "string"}}}}],
+            call_result="some observation",
+        )
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(gw):
             result = react_loop("u1", "keep going", max_steps=2)
         assert "too many" in result.lower()

@@ -1,32 +1,25 @@
-"""Tool registry and orchestration.
+"""Tool orchestration for the ACT pipeline.
 
-The ACT pipeline is **MCP-only** as of Step 17c.1: ``run_llm_with_tools``
-discovers every tool at runtime from the servers in ``MCP_SERVERS`` (via
-``tools/list``) and never dispatches to an in-process tool. Adding a tool
-means adding a server to ``MCP_SERVERS`` — no edits here.
+As of Step 17c.2 the agent has **zero hardcoded tools**. Both ACT
+(``run_llm_with_tools``) and ReAct (``reasoning.react_engine``) reach every tool
+over MCP via the shared gateway in ``agentforge.mcp_client``: tools are discovered
+at runtime from the servers in ``MCP_SERVERS`` (via ``tools/list``) and dispatched
+through an open session. Adding a tool means adding a server to ``MCP_SERVERS`` —
+no edits here. There is no in-process tool registry any more.
 
-The local ``TOOL_MODULES`` / ``TOOL_REGISTRY`` / ``execute_tool`` machinery
-below is **retained only for the ReAct pipeline** (``reasoning.react_engine``),
-which still dispatches tools in-process. Step 17c.2 migrates ReAct to MCP and
-deletes this machinery — at which point the agent has *zero* hardcoded tools.
-
-Each local tool module under ``agentforge.tools`` exports two names:
-- ``TOOL_FUNCTION`` — the callable, signature ``(**kwargs) -> str``
-- ``TOOL_SCHEMA``   — the OpenAI function-calling schema for the tool
+The tool *implementation* modules (``wikipedia``, ``weather``, ``news``) still
+live under this package, but only because the MCP servers in ``mcp_servers/``
+delegate to them. The agent itself imports none of them as callable tools.
 """
 import asyncio
-import contextlib
 import json
 import logging
-import sys
-from typing import Any, Callable, Dict
 
-from mcp import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
 from openai import OpenAI
 
-from agentforge.config import MCP_SERVERS, OPENAI_BASE_URL, OPENAI_MODEL
+from agentforge.config import OPENAI_BASE_URL, OPENAI_MODEL
 from agentforge.logger import log_event, log_token_usage
+from agentforge.mcp_client import mcp_gateway
 from agentforge.memory.semantic import get_relevant_memories
 from agentforge.prompts import MEMORY_INSTRUCTIONS, OUTPUT_SCHEMA, SYSTEM_PROMPT
 from agentforge.tools import news, weather, wikipedia
@@ -41,19 +34,6 @@ def _get_client():
     if _client is None:
         _client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
     return _client
-
-
-# -------------------- LOCAL TOOL REGISTRY (ReAct only) --------------------
-# Retained ONLY for the ReAct pipeline, which still dispatches tools in-process
-# via execute_tool. The ACT pipeline no longer uses any of these (Step 17c.1).
-# Step 17c.2 migrates ReAct to MCP and removes this whole block.
-TOOL_MODULES = [wikipedia, weather, news]
-
-TOOL_REGISTRY: Dict[str, Callable] = {
-    m.TOOL_FUNCTION.__name__: m.TOOL_FUNCTION for m in TOOL_MODULES
-}
-
-TOOLS_SCHEMA = [m.TOOL_SCHEMA for m in TOOL_MODULES]
 
 
 # -------------------- CLASSIFIER TOOL CATALOG (from MCP discovery) --------------------
@@ -110,73 +90,21 @@ def build_messages(user_id: str, user_input: str):
     ]
 
 
-# -------------------- TOOL EXECUTION --------------------
-
-def execute_tool(name: str, arguments: Dict[str, Any]) -> str:
-    log_event("tool_call", {"tool": name, "arguments": arguments})
-
-    if name not in TOOL_REGISTRY:
-        return f"Error: Unknown tool '{name}'"
-
-    try:
-        result = TOOL_REGISTRY[name](**arguments)
-        log_event("tool_result", {"tool": name, "result": result})
-        return result
-    except Exception as e:
-        return f"Tool execution error: {e}"
-
-
 # -------------------- MCP INTEGRATION --------------------
-
-def _mcp_tool_to_openai_schema(tool) -> dict:
-    """Convert an MCP tool definition to the OpenAI function-calling schema shape."""
-    return {
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description or "",
-            "parameters": tool.inputSchema,
-        },
-    }
-
-
-async def _call_mcp_tool(
-    session,
-    tool_name: str,
-    arguments: Dict[str, Any],
-    trace_id: str = None,
-) -> str:
-    """Call one tool via an already-open MCP session; return its text result."""
-    try:
-        result = await session.call_tool(tool_name, arguments)
-        text = " ".join(c.text for c in result.content if hasattr(c, "text"))
-        log_event("mcp_tool_call", {"tool": tool_name, "is_error": result.isError}, trace_id=trace_id)
-        return f"Tool error: {text}" if result.isError else text
-    except Exception as exc:
-        return f"MCP tool error: {exc}"
+# Discovery + dispatch live in agentforge.mcp_client (the shared gateway). Both
+# this ACT pipeline and the ReAct pipeline open one gateway per turn, so the
+# protocol plumbing and the untrusted-output boundary exist in exactly one place.
 
 
 async def _discover_catalog_async() -> list:
-    """Connect to each MCP server once and collect {name, description} per tool.
+    """Discover {name, description} per tool for the classifier catalog.
 
-    This is the lightweight discovery used to build the classifier catalog — it
-    only needs names + descriptions, so the sessions are opened and torn down
-    immediately (unlike _run_tool_loop, which keeps them open to *call* tools).
+    Lightweight discovery: open a gateway, read its catalog, tear it down. Used to
+    prime the intent classifier's tool list (see prime_tool_catalog). Reuses the
+    same gateway as the ACT/ReAct loops — one discovery code path, no drift.
     """
-    catalog: list = []
-    async with contextlib.AsyncExitStack() as stack:
-        for server_path in MCP_SERVERS:
-            params = StdioServerParameters(command=sys.executable, args=[server_path])
-            try:
-                read, write = await stack.enter_async_context(stdio_client(params))
-                session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
-                tools_result = await session.list_tools()
-                for tool in tools_result.tools:
-                    catalog.append({"name": tool.name, "description": tool.description or ""})
-            except Exception as exc:
-                logger.warning("Catalog discovery failed for %s: %s", server_path, exc)
-    return catalog
+    async with mcp_gateway() as gw:
+        return [{"name": t["name"], "description": t["description"]} for t in gw.catalog]
 
 
 def prime_tool_catalog(force: bool = False) -> list:
@@ -195,43 +123,16 @@ def prime_tool_catalog(force: bool = False) -> list:
 
 
 async def _run_tool_loop(messages: list, trace_id: str = None) -> str:
-    """Connect to configured MCP servers, discover their tools, run the tool loop.
+    """Open the shared MCP gateway, then run the single-pick ACT tool loop.
 
-    Session lifecycle: one subprocess spawn per MCP server per run_llm_with_tools
-    call. All tool calls within a single agent turn share the same open sessions —
-    no reconnect overhead between tool calls.
+    ACT is MCP-only (Step 17c.1): every tool is discovered from the gateway; there
+    is no in-process dispatch. The gateway holds one session per server open for
+    the whole turn, so the model's tool call and the follow-up share connections.
     """
-    mcp_tool_registry: Dict[str, str] = {}  # tool_name → server_path
-    mcp_schemas: list = []
-    open_sessions: Dict[str, Any] = {}       # server_path → live ClientSession
+    async with mcp_gateway(trace_id) as gw:
 
-    async with contextlib.AsyncExitStack() as stack:
-
-        # ---- 1. Discovery: connect to each server, ask tools/list ----
-        for server_path in MCP_SERVERS:
-            params = StdioServerParameters(command=sys.executable, args=[server_path])
-            try:
-                read, write = await stack.enter_async_context(stdio_client(params))
-                session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
-                open_sessions[server_path] = session
-
-                tools_result = await session.list_tools()
-                for tool in tools_result.tools:
-                    mcp_tool_registry[tool.name] = server_path
-                    mcp_schemas.append(_mcp_tool_to_openai_schema(tool))
-
-                log_event(
-                    "mcp_discovery",
-                    {"server": server_path, "tools": [t.name for t in tools_result.tools]},
-                    trace_id=trace_id,
-                )
-            except Exception as exc:
-                logger.warning("MCP discovery failed for %s: %s", server_path, exc)
-
-        # ---- 2. ACT is MCP-only: tools come entirely from discovery ----
-        all_schemas = mcp_schemas
-        if not all_schemas:
+        # ---- 1. ACT is MCP-only: tools come entirely from discovery ----
+        if not gw.has_tools:
             # No MCP tools discovered (all servers down / misconfigured). With
             # tool_choice="required" and an empty tool list the API would error,
             # so bail out gracefully instead of crashing the turn.
@@ -242,12 +143,12 @@ async def _run_tool_loop(messages: list, trace_id: str = None) -> str:
                 "memory_text": "",
             })
 
-        # ---- 3. First LLM call: let the model pick a tool ----
+        # ---- 2. First LLM call: let the model pick a tool ----
         try:
             response = _get_client().chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=messages,
-                tools=all_schemas,
+                tools=gw.openai_schemas,
                 tool_choice="required",
             )
             log_token_usage(response, "act_tool_call", trace_id=trace_id)
@@ -262,7 +163,10 @@ async def _run_tool_loop(messages: list, trace_id: str = None) -> str:
         if not message.tool_calls:
             return message.content
 
-        # ---- 4. Dispatch each tool call: MCP registry first, local second ----
+        # ---- 3. Dispatch each tool call through the gateway ----
+        # gw.call handles unknown/hallucinated tool names by returning a readable
+        # error string (it does not raise) — same recoverable-observation contract
+        # the loop already relies on.
         tool_messages = []
         for tool_call in message.tool_calls:
             tool_name = tool_call.function.name
@@ -276,26 +180,14 @@ async def _run_tool_loop(messages: list, trace_id: str = None) -> str:
                 })
                 continue
 
-            if tool_name in mcp_tool_registry:
-                tool_result = await _call_mcp_tool(
-                    open_sessions[mcp_tool_registry[tool_name]],
-                    tool_name,
-                    arguments,
-                    trace_id,
-                )
-            else:
-                # ACT is MCP-only — there is no local dispatch. A tool name that
-                # isn't in the discovered registry means the model hallucinated it.
-                log_event("act_unknown_tool", {"tool": tool_name}, trace_id=trace_id)
-                tool_result = f"Error: Unknown tool '{tool_name}'"
-
+            tool_result = await gw.call(tool_name, arguments)
             tool_messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
                 "content": tool_result,
             })
 
-        # ---- 5. Follow-up LLM call: turn tool results into a final answer ----
+        # ---- 4. Follow-up LLM call: turn tool results into a final answer ----
         try:
             followup = _get_client().chat.completions.create(
                 model=OPENAI_MODEL,

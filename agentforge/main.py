@@ -213,7 +213,7 @@ Classify the user's intent into ONE of the following:
   ACT examples:
   - "what's the weather in Tokyo" → get_weather (live data, model doesn't know)
   - "latest news about OpenAI" → get_top_news (current events)
-  - "who is Ada Lovelace" → wikipedia_lookup (factual entity lookup)
+  - "who is Ada Lovelace" → search_wikipedia (factual entity lookup)
 - REACT → complex tasks requiring reasoning, planning, decomposition, or multiple steps
   Examples: planning a trip, scheduling tasks, comparing options, multi-step problem solving
 - ANSWER → informational response answerable from the model's own knowledge

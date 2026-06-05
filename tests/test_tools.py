@@ -1,14 +1,13 @@
 """
-Unit tests for agentforge.tools: tool registry, execute_tool, wikipedia_lookup.
+Unit tests for agentforge.tools: the (MCP-only) ACT loop, the classifier tool
+catalog, and the tool implementation functions (wikipedia/weather/news) that the
+MCP servers delegate to. As of Step 17c.2 there is no in-process tool registry.
 """
 import json
 import urllib.error
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from agentforge.tools import (
-    TOOL_REGISTRY,
-    _mcp_tool_to_openai_schema,
-    execute_tool,
     get_top_news,
     get_weather,
     prime_tool_catalog,
@@ -16,23 +15,6 @@ from agentforge.tools import (
     tool_catalog_for_classifier,
     wikipedia_lookup,
 )
-
-
-class TestToolRegistry:
-    """The registry is built from TOOL_MODULES at import time."""
-
-    def test_wikipedia_in_registry(self):
-        assert "wikipedia_lookup" in TOOL_REGISTRY
-
-    def test_weather_in_registry(self):
-        assert "get_weather" in TOOL_REGISTRY
-
-    def test_news_in_registry(self):
-        assert "get_top_news" in TOOL_REGISTRY
-
-    def test_registry_entries_are_callable(self):
-        for name, func in TOOL_REGISTRY.items():
-            assert callable(func), f"{name} is not callable"
 
 
 class TestToolCatalogForClassifier:
@@ -59,32 +41,6 @@ class TestToolCatalogForClassifier:
         # referenced "calculation" — this test guards against that drift.
         catalog = tool_catalog_for_classifier().lower()
         assert "calculator" not in catalog
-
-
-class TestExecuteTool:
-    """Tests for execute_tool (mocking log_event to avoid side effects)."""
-
-    @patch("agentforge.tools.log_event")
-    def test_unknown_tool_returns_error(self, mock_log):
-        result = execute_tool("nonexistent_tool", {})
-        assert "Unknown tool" in result
-        assert "nonexistent_tool" in result
-
-    @patch("agentforge.tools.log_event")
-    @patch("agentforge.tools.wikipedia.urllib.request.urlopen")
-    def test_execute_wikipedia_lookup(self, mock_urlopen, mock_log):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({
-            "title": "Python",
-            "extract": "Python is a programming language.",
-        }).encode("utf-8")
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
-
-        result = execute_tool("wikipedia_lookup", {"topic": "Python"})
-        assert "Python" in result
-        assert "programming language" in result
 
 
 class TestWikipediaLookup:
@@ -390,25 +346,14 @@ def _patch_mcp_transport(session_mock):
     return mock_stdio, mock_cs
 
 
-class TestMcpToolSchemaConversion:
-    """_mcp_tool_to_openai_schema converts MCP tool defs to OpenAI format."""
-
-    def test_shape_is_correct(self):
-        tool = _make_mcp_tool("search_wikipedia", "Search Wikipedia for a topic")
-        schema = _mcp_tool_to_openai_schema(tool)
-        assert schema["type"] == "function"
-        assert schema["function"]["name"] == "search_wikipedia"
-        assert schema["function"]["description"] == "Search Wikipedia for a topic"
-        assert schema["function"]["parameters"]["properties"]["topic"]["type"] == "string"
-
-    def test_missing_description_becomes_empty_string(self):
-        tool = _make_mcp_tool("no_desc", description=None)
-        schema = _mcp_tool_to_openai_schema(tool)
-        assert schema["function"]["description"] == ""
+# NOTE: MCP tool-schema conversion + low-level discovery/dispatch are covered in
+# tests/test_mcp_client.py (the shared gateway). These tests exercise the ACT
+# pipeline end-to-end, patching the transport at agentforge.mcp_client.* since
+# discovery now lives in the gateway.
 
 
 class TestMcpToolRouting:
-    """run_llm_with_tools routes MCP-registered tools through the MCP session."""
+    """run_llm_with_tools routes MCP-discovered tools through the gateway session."""
 
     def _openai_mock(self, tool_name, tool_args, final_content):
         """Build a mock OpenAI client with two canned responses."""
@@ -436,16 +381,17 @@ class TestMcpToolRouting:
         mock_client.chat.completions.create.side_effect = [first_resp, second_resp]
         return mock_client
 
-    @patch("agentforge.tools.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.mcp_client.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.mcp_client.log_event")
     @patch("agentforge.tools.log_event")
     @patch("agentforge.tools.log_token_usage")
     @patch("agentforge.tools.get_relevant_memories", return_value="")
-    def test_mcp_tool_is_routed_through_session(self, _mem, _usage, _log):
+    def test_mcp_tool_is_routed_through_session(self, _mem, _usage, _log, _mcplog):
         session = _make_session_mock([_make_mcp_tool("search_wikipedia")])
         mock_stdio, mock_cs = _patch_mcp_transport(session)
 
-        with patch("agentforge.tools.stdio_client", mock_stdio), \
-             patch("agentforge.tools.ClientSession", mock_cs), \
+        with patch("agentforge.mcp_client.stdio_client", mock_stdio), \
+             patch("agentforge.mcp_client.ClientSession", mock_cs), \
              patch("agentforge.tools._get_client",
                    return_value=self._openai_mock(
                        "search_wikipedia",
@@ -454,22 +400,23 @@ class TestMcpToolRouting:
                    )):
             run_llm_with_tools("user1", "Tell me about Python")
 
-        # The MCP session's call_tool must have been used — not local TOOL_REGISTRY
+        # The gateway session's call_tool must have been used — not local dispatch
         session.call_tool.assert_called_once_with("search_wikipedia", {"topic": "Python"})
 
-    @patch("agentforge.tools.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.mcp_client.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.mcp_client.log_event")
     @patch("agentforge.tools.log_event")
     @patch("agentforge.tools.log_token_usage")
     @patch("agentforge.tools.get_relevant_memories", return_value="")
-    def test_unknown_tool_is_not_dispatched_locally(self, _mem, _usage, _log):
+    def test_unknown_tool_is_not_dispatched_locally(self, _mem, _usage, _log, _mcplog):
         # ACT is MCP-only (Step 17c.1): if the model names a tool that wasn't
-        # discovered from any MCP server, there is NO local fallback — the call
-        # is rejected and the MCP session is never used for it.
+        # discovered from any MCP server, there is NO local fallback — the gateway
+        # returns an error string and the session is never used for it.
         session = _make_session_mock([_make_mcp_tool("search_wikipedia")])
         mock_stdio, mock_cs = _patch_mcp_transport(session)
 
-        with patch("agentforge.tools.stdio_client", mock_stdio), \
-             patch("agentforge.tools.ClientSession", mock_cs), \
+        with patch("agentforge.mcp_client.stdio_client", mock_stdio), \
+             patch("agentforge.mcp_client.ClientSession", mock_cs), \
              patch("agentforge.tools._get_client",
                    return_value=self._openai_mock(
                        "get_weather",  # NOT in the discovered registry below
@@ -482,11 +429,12 @@ class TestMcpToolRouting:
         # is not dispatched through the session — and there is no local path.
         session.call_tool.assert_not_called()
 
-    @patch("agentforge.tools.MCP_SERVERS", ["bad/server.py"])
+    @patch("agentforge.mcp_client.MCP_SERVERS", ["bad/server.py"])
+    @patch("agentforge.mcp_client.log_event")
     @patch("agentforge.tools.log_event")
     @patch("agentforge.tools.log_token_usage")
     @patch("agentforge.tools.get_relevant_memories", return_value="")
-    def test_mcp_discovery_failure_returns_graceful_reply(self, _mem, _usage, _log):
+    def test_mcp_discovery_failure_returns_graceful_reply(self, _mem, _usage, _log, _mcplog):
         # Subprocess fails to start → no tools discovered. ACT is MCP-only, so
         # there is no local fallback: it must return a graceful reply, not crash,
         # and must not attempt a forced tool call against an empty tool list.
@@ -495,7 +443,7 @@ class TestMcpToolRouting:
         stdio_cm.__aexit__ = AsyncMock(return_value=None)
         mock_stdio = MagicMock(return_value=stdio_cm)
 
-        with patch("agentforge.tools.stdio_client", mock_stdio):
+        with patch("agentforge.mcp_client.stdio_client", mock_stdio):
             result = run_llm_with_tools("user1", "What's the weather in Paris?")
 
         payload = json.loads(result)
@@ -507,9 +455,10 @@ class TestPrimeToolCatalog:
     """prime_tool_catalog discovers {name, description} per tool from MCP servers
     and caches them for the classifier (Step 17c.1)."""
 
-    @patch("agentforge.tools.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.mcp_client.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.mcp_client.log_event")
     @patch("agentforge.tools.log_event")
-    def test_prime_discovers_tool_names_and_descriptions(self, _log, monkeypatch):
+    def test_prime_discovers_tool_names_and_descriptions(self, _log, _mcplog, monkeypatch):
         import agentforge.tools as tools_mod
 
         session = _make_session_mock(
@@ -519,8 +468,8 @@ class TestPrimeToolCatalog:
         # Clear the conftest-seeded cache so prime actually runs discovery.
         monkeypatch.setattr(tools_mod, "_TOOL_CATALOG_CACHE", None)
 
-        with patch("agentforge.tools.stdio_client", mock_stdio), \
-             patch("agentforge.tools.ClientSession", mock_cs):
+        with patch("agentforge.mcp_client.stdio_client", mock_stdio), \
+             patch("agentforge.mcp_client.ClientSession", mock_cs):
             catalog = tools_mod.prime_tool_catalog(force=True)
 
         names = [t["name"] for t in catalog]
@@ -528,7 +477,7 @@ class TestPrimeToolCatalog:
         entry = next(t for t in catalog if t["name"] == "search_wikipedia")
         assert entry["description"] == "Search Wikipedia for a topic"
 
-    @patch("agentforge.tools.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.mcp_client.MCP_SERVERS", ["dummy/server.py"])
     @patch("agentforge.tools.log_event")
     def test_prime_is_cached_until_forced(self, _log, monkeypatch):
         import agentforge.tools as tools_mod

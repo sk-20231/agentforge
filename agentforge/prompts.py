@@ -37,7 +37,7 @@ Schema:
   },
   "action": {
     "type": "tool | final",
-    "tool_name": "calculator | null",
+    "tool_name": "<exact name of one available tool, or null>",
     "tool_input": {}
   },
   "reply": "final answer to the user (only if action.type is final)",
@@ -56,6 +56,38 @@ Rules:
 - NEVER ask the user for permission to store memory.
 """
 
+
+
+def render_tool_catalog(catalog):
+    """Render the MCP-discovered tools for the ReAct prompt.
+
+    ReAct emits tool calls as a custom JSON ``action`` (not OpenAI function
+    calling), so the model only knows which tools exist — and what arguments they
+    take — if we tell it in the prompt. We build that list at runtime from the
+    gateway's discovered catalog, so the agent can never advertise a tool that
+    isn't actually served. (Before Step 17c.2 this was a hardcoded "calculator"
+    string that had been deleted from the codebase — the classic prompt-vs-reality
+    drift this dynamic render eliminates by construction.)
+
+    ``catalog`` is a list of ``{"name", "description", "input_schema"}`` dicts.
+    An empty catalog yields an explicit "no tools" line so the model answers
+    directly instead of inventing one.
+    """
+    if not catalog:
+        return "Available tools: none right now. Answer directly without calling a tool."
+
+    lines = [
+        "Available tools (you may set action.tool_name to one of these EXACT names):"
+    ]
+    for tool in catalog:
+        props = (tool.get("input_schema") or {}).get("properties", {})
+        args = ", ".join(
+            f'"{key}": <{spec.get("type", "any")}>' for key, spec in props.items()
+        )
+        lines.append(
+            f'- {tool["name"]}: {tool["description"]} | tool_input: {{{args}}}'
+        )
+    return "\n".join(lines)
 
 
 def build_prompt(user_input, memory_chunks):

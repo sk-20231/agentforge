@@ -74,7 +74,8 @@ Every LLM call goes through a `Span` context manager that records start/end time
 | **Semantic memory** | [`memory/semantic.py`](agentforge/memory/semantic.py) | Long-term, queryable user context via embeddings |
 | **Embeddings + cosine similarity** | [`memory/semantic.py`](agentforge/memory/semantic.py) | Core primitive for "find things similar to this" |
 | **Tool calling** | [`tools/`](agentforge/tools/) | Deterministic operations + live external data |
-| **Tool registry as single source of truth** | [`tools/__init__.py — tool_catalog_for_classifier`](agentforge/tools/__init__.py) | Classifier sees the live tool list; adding a tool to `TOOL_MODULES` updates routing automatically |
+| **MCP (Model Context Protocol)** | [`mcp_client.py`](agentforge/mcp_client.py) + [`mcp_servers/`](mcp_servers/) | Zero hardcoded tools — both ACT and ReAct discover and call tools at runtime over MCP via one shared gateway |
+| **Runtime tool discovery as single source of truth** | [`mcp_client.py — MCPGateway`](agentforge/mcp_client.py) | Classifier and ReAct prompt both render the *discovered* tool list; adding an MCP server updates routing automatically — no prompt or registry edits |
 | **Indirect prompt injection defences** | [`tools/_safety.py`](agentforge/tools/_safety.py) | Sanitize + wrap external text as `untrusted_data` so model treats it as data, not instruction |
 | **ReAct reasoning** | [`reasoning/react_engine.py`](agentforge/reasoning/react_engine.py) | Multi-step tasks need think-act-observe loops |
 | **RAG (retrieval-augmented generation)** | [`rag/`](agentforge/rag/) | Ground answers in a real corpus, not model memory |

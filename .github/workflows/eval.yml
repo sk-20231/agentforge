@@ -98,6 +98,9 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+          # Editable install so `import agentforge` resolves in any subprocess the
+          # agent spawns (MCP servers), not just the main eval process.
+          pip install -e .
 
       # -----------------------------------------------------------------------
       # 4. Run the full eval suite

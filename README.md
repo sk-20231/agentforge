@@ -1,24 +1,24 @@
 # AgentForge
 
-> An AI agent built from primitives — no LangChain, no LlamaIndex, no framework magic. Intent routing, RAG with citation guardrails, ReAct reasoning, evaluation gating in CI, cost tracking, and trace observability — all implemented directly against the OpenAI API.
+> An AI agent built to learn AI engineering deeply. Its core — intent routing, semantic memory, RAG with citation guardrails, ReAct reasoning, evaluation gating in CI, cost tracking, and trace observability — is built from primitives against the OpenAI API to expose every moving part. Tools are then served over **MCP (Model Context Protocol)** through a shared gateway, including a third-party server consumed safely. The goal: understand the internals *and* be fluent with the tools the industry runs on.
 
 ![CI](https://github.com/sk-20231/agentforge/actions/workflows/ci.yml/badge.svg)
 ![Eval Gate](https://github.com/sk-20231/agentforge/actions/workflows/eval.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
-![Tests](https://img.shields.io/badge/tests-163_passing-blue)
+![Tests](https://img.shields.io/badge/tests-207_passing-blue)
 
 ---
 
 ## Why this exists
 
-High-level frameworks (LangChain, LlamaIndex) get you running fast but hide the parts that matter when you need to **debug, evaluate, or scale** an AI system:
+The fastest way to truly *understand* an AI system is to build its core yourself. Reach for a high-level framework first and the parts that matter when you need to **debug, evaluate, or scale** stay hidden:
 
 - What does retrieval actually return?
 - Why did the model hallucinate that citation?
 - Which prompt burned the token budget?
 - How do you *know* the new embedding model didn't regress quality?
 
-AgentForge is the same capabilities, built from the ground up — so every decision (chunk size, similarity metric, routing logic, citation format, eval thresholds) is visible and tunable. It's what I'd reach for if I needed to understand *what's really happening* behind an agent.
+So AgentForge's core is built from the ground up — every decision (chunk size, similarity metric, routing logic, citation format, eval thresholds) is visible and tunable. **Then**, from that understanding, it integrates the production-grade tools the industry actually uses — starting with **MCP (Model Context Protocol)** for tool/resource interop, including consuming a third-party server behind a client-side security boundary. The point isn't to avoid frameworks; it's to understand *what's really happening* behind an agent **and** be fluent with the tooling teams ship on.
 
 ---
 
@@ -28,7 +28,8 @@ An interactive agent (CLI or Streamlit UI) that can:
 
 - **Classify intent** and route each message to the right pipeline (remember, act, reason, search docs, etc.)
 - **Remember things** using semantic memory (embeddings + cosine similarity)
-- **Use tools** — Wikipedia, weather (open-meteo), and HackerNews — all sanitized and wrapped as untrusted data to defend against indirect prompt injection
+- **Use tools over MCP** — Wikipedia, weather (open-meteo), and HackerNews run as our own MCP servers, plus a third-party `fetch` server consumed over the protocol. All tool output is sanitized and wrapped as untrusted data to defend against indirect prompt injection; untrusted third-party servers also get a client-side SSRF URL guard
+- **Zero hardcoded tools** — both the ACT and ReAct pipelines discover and call every tool at runtime over MCP through a shared gateway; adding a tool means adding a server, not editing the agent
 - **Multi-step reasoning** — ReAct (Reason + Act) loop for complex tasks
 - **Answer from documents (RAG)** — chunk, embed, retrieve, generate with a citation guardrail that strips hallucinated references
 - **Personalize** answers with stored user facts

@@ -57,6 +57,16 @@ def _patch_mcp_transport(session_mock):
     return mock_stdio, mock_cs
 
 
+# One-server config in the standard mcpServers dict shape (Step 17d). trusted=True
+# so these routing/dispatch tests don't trigger client-side wrapping; the wrap
+# behaviour is covered separately with a trusted=False server.
+_DUMMY_SERVERS = {"dummy": {"command": "python", "args": ["dummy/server.py"], "trusted": True}}
+
+# A third-party (untrusted) server: the gateway must guard its URL args and wrap
+# its output. Tests use numeric-IP URLs so is_safe_url needs no real DNS lookup.
+_UNTRUSTED_SERVERS = {"ext": {"command": "uvx", "args": ["some-tool"], "trusted": False}}
+
+
 def _run_with_gateway(session_mock, servers, body):
     """Open a gateway over a mocked transport, run ``body(gw)``, return its result."""
     mock_stdio, mock_cs = _patch_mcp_transport(session_mock)
@@ -103,7 +113,7 @@ class TestDiscovery:
         async def body(gw):
             return gw
 
-        gw = _run_with_gateway(session, ["dummy/server.py"], body)
+        gw = _run_with_gateway(session, _DUMMY_SERVERS, body)
 
         assert gw.has_tools is True
         names = [t["name"] for t in gw.catalog]
@@ -125,7 +135,8 @@ class TestDiscovery:
             async with mcp_gateway() as gw:
                 return gw.has_tools, gw.catalog
 
-        with patch("agentforge.mcp_client.MCP_SERVERS", ["bad/server.py"]), \
+        with patch("agentforge.mcp_client.MCP_SERVERS",
+                   {"bad": {"command": "python", "args": ["bad/server.py"], "trusted": True}}), \
              patch("agentforge.mcp_client.log_event"), \
              patch("agentforge.mcp_client.stdio_client", mock_stdio):
             has_tools, catalog = asyncio.run(_go())
@@ -144,7 +155,7 @@ class TestCall:
         async def body(gw):
             return await gw.call("search_wikipedia", {"topic": "Python"})
 
-        result = _run_with_gateway(session, ["dummy/server.py"], body)
+        result = _run_with_gateway(session, _DUMMY_SERVERS, body)
         session.call_tool.assert_called_once_with("search_wikipedia", {"topic": "Python"})
         assert "Python is a language" in result
 
@@ -154,7 +165,7 @@ class TestCall:
         async def body(gw):
             return await gw.call("get_weather", {"city": "Tokyo"})  # never discovered
 
-        result = _run_with_gateway(session, ["dummy/server.py"], body)
+        result = _run_with_gateway(session, _DUMMY_SERVERS, body)
         assert "Unknown tool 'get_weather'" in result
         session.call_tool.assert_not_called()
 
@@ -165,7 +176,7 @@ class TestCall:
         async def body(gw):
             return await gw.call("search_wikipedia", {"topic": "x"})
 
-        result = _run_with_gateway(session, ["dummy/server.py"], body)
+        result = _run_with_gateway(session, _DUMMY_SERVERS, body)
         assert result.startswith("Tool error:")
         assert "boom" in result
 
@@ -176,6 +187,57 @@ class TestCall:
         async def body(gw):
             return await gw.call("search_wikipedia", {"topic": "x"})
 
-        result = _run_with_gateway(session, ["dummy/server.py"], body)
+        result = _run_with_gateway(session, _DUMMY_SERVERS, body)
         assert "MCP tool error" in result
         assert "transport died" in result
+
+
+class TestUntrustedGuards:
+    """Untrusted (third-party) servers get an SSRF URL guard + output wrapping (17d)."""
+
+    def test_unsafe_url_blocked_before_dispatch(self):
+        session = _make_session_mock([_make_mcp_tool("fetch")])
+
+        async def body(gw):
+            # link-local / cloud-metadata address — numeric, no DNS needed
+            return await gw.call("fetch", {"url": "http://169.254.169.254/latest/meta-data"})
+
+        result = _run_with_gateway(session, _UNTRUSTED_SERVERS, body)
+        assert "refused" in result.lower()
+        session.call_tool.assert_not_called()
+
+    def test_safe_url_is_dispatched_and_output_wrapped(self):
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE BODY")
+
+        async def body(gw):
+            # public numeric IP — passes is_safe_url without a real DNS lookup
+            return await gw.call("fetch", {"url": "http://8.8.8.8/page"})
+
+        result = _run_with_gateway(session, _UNTRUSTED_SERVERS, body)
+        session.call_tool.assert_called_once_with("fetch", {"url": "http://8.8.8.8/page"})
+        assert "<untrusted_data" in result          # client-side spotlight applied
+        assert "PAGE BODY" in result
+
+    def test_trusted_output_is_not_double_wrapped(self):
+        # Trusted servers already wrap server-side; the gateway must NOT wrap again.
+        session = _make_session_mock(
+            [_make_mcp_tool("search_wikipedia")],
+            call_text="<untrusted_data>wiki</untrusted_data>",
+        )
+
+        async def body(gw):
+            return await gw.call("search_wikipedia", {"topic": "x"})
+
+        result = _run_with_gateway(session, _DUMMY_SERVERS, body)
+        assert result == "<untrusted_data>wiki</untrusted_data>"
+
+    def test_non_url_args_to_untrusted_server_pass_through(self):
+        # The guard only blocks unsafe URLs; ordinary args must still work.
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="ok")
+
+        async def body(gw):
+            return await gw.call("fetch", {"topic": "not a url"})
+
+        result = _run_with_gateway(session, _UNTRUSTED_SERVERS, body)
+        session.call_tool.assert_called_once()
+        assert "<untrusted_data" in result

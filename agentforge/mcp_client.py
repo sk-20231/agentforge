@@ -32,14 +32,18 @@ Security boundary — tool output is untrusted:
 """
 import contextlib
 import logging
-import sys
 from typing import Any, Dict, List, Optional
 
 from mcp import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.stdio import (
+    StdioServerParameters,
+    get_default_environment,
+    stdio_client,
+)
 
 from agentforge.config import MCP_SERVERS
 from agentforge.logger import log_event
+from agentforge.safety import is_safe_url, wrap_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +81,8 @@ class MCPGateway:
     def __init__(self, trace_id: Optional[str] = None):
         self.trace_id = trace_id
         self._sessions: Dict[str, Any] = {}        # tool_name -> live ClientSession
+        self._trusted: Dict[str, bool] = {}        # tool_name -> is its server trusted?
+        self._server_of: Dict[str, str] = {}       # tool_name -> server name (for logging)
         self.catalog: List[dict] = []              # [{name, description, input_schema}]
         self.openai_schemas: List[dict] = []       # OpenAI function-calling schemas
 
@@ -87,12 +93,22 @@ class MCPGateway:
     async def _discover(self, stack: contextlib.AsyncExitStack) -> None:
         """Connect to each configured server, initialize, and list its tools.
 
-        A server that fails to start or respond is logged and skipped — one bad
-        server must not blind the agent to the others. The sessions are entered
-        on the caller-supplied ``stack`` so they stay open for the whole turn.
+        Reads the standard ``mcpServers`` config shape (Step 17d): a name -> config
+        map where each config gives ``command`` / ``args`` / optional ``env`` and a
+        ``trusted`` flag. A server that fails to start or respond is logged and
+        skipped — one bad server must not blind the agent to the others. Sessions
+        are entered on the caller-supplied ``stack`` so they stay open for the turn.
         """
-        for server_path in MCP_SERVERS:
-            params = StdioServerParameters(command=sys.executable, args=[server_path])
+        for name, cfg in MCP_SERVERS.items():
+            # env: start from the SDK's minimal-safe default (which includes PATH so
+            # launchers like `uvx` resolve) and layer this server's own env on top.
+            # Per-server env keeps one server's secrets out of another's process.
+            extra_env = cfg.get("env")
+            env = {**get_default_environment(), **extra_env} if extra_env else None
+            params = StdioServerParameters(
+                command=cfg["command"], args=cfg.get("args", []), env=env
+            )
+            trusted = bool(cfg.get("trusted", False))
             try:
                 read, write = await stack.enter_async_context(stdio_client(params))
                 session = await stack.enter_async_context(ClientSession(read, write))
@@ -100,6 +116,8 @@ class MCPGateway:
                 tools_result = await session.list_tools()
                 for tool in tools_result.tools:
                     self._sessions[tool.name] = session
+                    self._trusted[tool.name] = trusted
+                    self._server_of[tool.name] = name
                     self.catalog.append({
                         "name": tool.name,
                         "description": tool.description or "",
@@ -108,11 +126,30 @@ class MCPGateway:
                     self.openai_schemas.append(mcp_tool_to_openai_schema(tool))
                 log_event(
                     "mcp_discovery",
-                    {"server": server_path, "tools": [t.name for t in tools_result.tools]},
+                    {
+                        "server": name,
+                        "trusted": trusted,
+                        "tools": [t.name for t in tools_result.tools],
+                    },
                     trace_id=self.trace_id,
                 )
             except Exception as exc:
-                logger.warning("MCP discovery failed for %s: %s", server_path, exc)
+                logger.warning("MCP discovery failed for server '%s': %s", name, exc)
+
+    @staticmethod
+    def _unsafe_url_in(arguments: Dict[str, Any]):
+        """Return ``(url, reason)`` for the first http(s) URL argument that fails the
+        SSRF guard, or ``None`` if every URL-looking argument is safe.
+
+        Scans top-level string argument values that look like http(s) URLs — broad
+        enough to catch a fetch-style tool's ``url`` without hardcoding an arg name.
+        """
+        for value in (arguments or {}).values():
+            if isinstance(value, str) and value.strip().lower().startswith(("http://", "https://")):
+                ok, reason = is_safe_url(value)
+                if not ok:
+                    return value, reason
+        return None
 
     async def call(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         """Dispatch one tool call on the already-open session for that tool.
@@ -123,20 +160,45 @@ class MCPGateway:
         doesn't exist; this turns that into a recoverable observation, matching
         the dual-error model MCP itself uses (``isError`` results the LLM sees vs.
         protocol errors it never does).
+
+        For **untrusted** servers (ones we didn't write), two extra guards apply
+        (Step 17d): (1) an **SSRF URL guard** refuses to dispatch if an argument is
+        an http(s) URL pointing at an internal/private address, and (2) the tool's
+        output is **wrapped as untrusted data** client-side, since a third-party
+        server won't mark its own output. Our own (trusted) servers already wrap
+        server-side, so we don't double-wrap them.
         """
         session = self._sessions.get(tool_name)
         if session is None:
             log_event("mcp_unknown_tool", {"tool": tool_name}, trace_id=self.trace_id)
             return f"Error: Unknown tool '{tool_name}'"
+
+        trusted = self._trusted.get(tool_name, False)
+        server = self._server_of.get(tool_name, "external")
+
+        if not trusted:
+            blocked = self._unsafe_url_in(arguments)
+            if blocked:
+                url, reason = blocked
+                log_event(
+                    "mcp_url_blocked",
+                    {"tool": tool_name, "server": server, "reason": reason},
+                    trace_id=self.trace_id,
+                )
+                return f"Error: refused to request '{url}' — {reason}"
+
         try:
             result = await session.call_tool(tool_name, arguments)
             text = " ".join(c.text for c in result.content if hasattr(c, "text"))
             log_event(
                 "mcp_tool_call",
-                {"tool": tool_name, "is_error": result.isError},
+                {"tool": tool_name, "server": server, "trusted": trusted, "is_error": result.isError},
                 trace_id=self.trace_id,
             )
-            return f"Tool error: {text}" if result.isError else text
+            if result.isError:
+                return f"Tool error: {text}"
+            # Spotlight untrusted output (Step 17d). Trusted servers self-wrap.
+            return text if trusted else wrap_untrusted(text, source=server)
         except Exception as exc:
             return f"MCP tool error: {exc}"
 

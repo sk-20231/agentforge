@@ -381,7 +381,7 @@ class TestMcpToolRouting:
         mock_client.chat.completions.create.side_effect = [first_resp, second_resp]
         return mock_client
 
-    @patch("agentforge.mcp_client.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.mcp_client.MCP_SERVERS", {"dummy": {"command": "python", "args": ["dummy/server.py"], "trusted": True}})
     @patch("agentforge.mcp_client.log_event")
     @patch("agentforge.tools.log_event")
     @patch("agentforge.tools.log_token_usage")
@@ -403,7 +403,7 @@ class TestMcpToolRouting:
         # The gateway session's call_tool must have been used — not local dispatch
         session.call_tool.assert_called_once_with("search_wikipedia", {"topic": "Python"})
 
-    @patch("agentforge.mcp_client.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.mcp_client.MCP_SERVERS", {"dummy": {"command": "python", "args": ["dummy/server.py"], "trusted": True}})
     @patch("agentforge.mcp_client.log_event")
     @patch("agentforge.tools.log_event")
     @patch("agentforge.tools.log_token_usage")
@@ -429,7 +429,7 @@ class TestMcpToolRouting:
         # is not dispatched through the session — and there is no local path.
         session.call_tool.assert_not_called()
 
-    @patch("agentforge.mcp_client.MCP_SERVERS", ["bad/server.py"])
+    @patch("agentforge.mcp_client.MCP_SERVERS", {"bad": {"command": "python", "args": ["bad/server.py"], "trusted": True}})
     @patch("agentforge.mcp_client.log_event")
     @patch("agentforge.tools.log_event")
     @patch("agentforge.tools.log_token_usage")
@@ -455,7 +455,7 @@ class TestPrimeToolCatalog:
     """prime_tool_catalog discovers {name, description} per tool from MCP servers
     and caches them for the classifier (Step 17c.1)."""
 
-    @patch("agentforge.mcp_client.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.mcp_client.MCP_SERVERS", {"dummy": {"command": "python", "args": ["dummy/server.py"], "trusted": True}})
     @patch("agentforge.mcp_client.log_event")
     @patch("agentforge.tools.log_event")
     def test_prime_discovers_tool_names_and_descriptions(self, _log, _mcplog, monkeypatch):
@@ -477,7 +477,7 @@ class TestPrimeToolCatalog:
         entry = next(t for t in catalog if t["name"] == "search_wikipedia")
         assert entry["description"] == "Search Wikipedia for a topic"
 
-    @patch("agentforge.mcp_client.MCP_SERVERS", ["dummy/server.py"])
+    @patch("agentforge.mcp_client.MCP_SERVERS", {"dummy": {"command": "python", "args": ["dummy/server.py"], "trusted": True}})
     @patch("agentforge.tools.log_event")
     def test_prime_is_cached_until_forced(self, _log, monkeypatch):
         import agentforge.tools as tools_mod

@@ -120,15 +120,27 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5) -
                 # treat anything inside those markers as data, never instructions.
                 observation = await gw.call(tool_name, tool_input)
 
+                # The ReAct loop speaks the prompt-based JSON protocol: the model
+                # returns {thought, action} as assistant *content*, not native
+                # tool_calls. So the observation must go back as an ordinary
+                # conversation turn — a user message — NOT a role:"tool" message.
+                # The OpenAI API only accepts a "tool" message immediately after an
+                # assistant message that carried tool_calls (the native
+                # function-calling path); feeding an orphan "tool" message here
+                # makes the next request fail with a 400. (Issue #1.)
+                #
+                # `observation` is already wrapped as <untrusted_data_<nonce>> by
+                # gw.call, so spotlighting (Step 17e) still holds inside the user
+                # turn — the spotlight rules tell the model to treat anything
+                # between those markers as data, never instructions.
                 messages.append({
                     "role": "assistant",
                     "content": raw
                 })
 
                 messages.append({
-                    "role": "tool",
-                    "name": tool_name,
-                    "content": observation
+                    "role": "user",
+                    "content": f"Observation from tool '{tool_name}':\n{observation}"
                 })
 
         log_event("react_end", {"steps_taken": max_steps, "reply_length": 0, "stopped": "max_steps"})

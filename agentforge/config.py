@@ -22,6 +22,11 @@ AGENT_MEMORY_DIR = os.environ.get("AGENT_MEMORY_DIR", "memory")
 AGENT_LOG_FILE = os.environ.get("AGENT_LOG_FILE", "agent_logs.jsonl")
 # Single JSON file where the document corpus (chunks + embeddings) is stored for RAG.
 AGENT_CORPUS_FILE = os.environ.get("AGENT_CORPUS_FILE", "corpus.json")
+# Tool "pins": baseline fingerprints of each untrusted MCP tool's definition,
+# recorded on first sight (trust-on-first-use). The gateway compares against these
+# on later turns to detect rug pulls (a tool's definition silently changing after
+# we trusted it). Runtime data — gitignored. (Step 17e gap C.)
+AGENT_TOOL_PINS_FILE = os.environ.get("AGENT_TOOL_PINS_FILE", "tool_pins.json")
 
 # Maximum estimated tokens allowed in conversation history before trimming.
 # Conservative default leaves room for system prompts + RAG chunks (which can

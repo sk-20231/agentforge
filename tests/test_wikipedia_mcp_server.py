@@ -99,8 +99,10 @@ def test_tool_error_on_invalid_topic():
     assert result.isError is True, "Expected isError: true for unknown topic"
 
 
-def test_tool_success_wraps_result_as_untrusted():
-    """tools/call with a valid topic must return isError: false and untrusted_data tag."""
+def test_tool_success_returns_raw_unwrapped_text():
+    """Step 17e: the server returns RAW sanitized text on success — the MCP gateway
+    (not the server) applies the <untrusted_data_<nonce>> wrap. So a direct call to
+    the server must come back un-wrapped, with isError: false and real content."""
     async def _run_inner():
         async with stdio_client(_params()) as (read, write):
             async with ClientSession(read, write) as session:
@@ -116,4 +118,5 @@ def test_tool_success_wraps_result_as_untrusted():
     if result.isError and _looks_transient(text):
         pytest.skip(f"Wikipedia upstream unavailable, not a code failure: {text}")
     assert result.isError is False, "Expected isError: false for valid topic"
-    assert "<untrusted_data" in text, "Result must be wrapped in <untrusted_data> tag"
+    assert "Python" in text, "Expected real summary content"
+    assert "<untrusted_data" not in text, "Server must NOT wrap — the gateway does (Step 17e)"

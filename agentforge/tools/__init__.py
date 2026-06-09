@@ -21,7 +21,12 @@ from agentforge.config import OPENAI_BASE_URL, OPENAI_MODEL
 from agentforge.logger import log_event, log_token_usage
 from agentforge.mcp_client import mcp_gateway
 from agentforge.memory.semantic import get_relevant_memories
-from agentforge.prompts import MEMORY_INSTRUCTIONS, OUTPUT_SCHEMA, SYSTEM_PROMPT
+from agentforge.prompts import (
+    MEMORY_INSTRUCTIONS,
+    OUTPUT_SCHEMA,
+    SPOTLIGHT_INSTRUCTIONS,
+    SYSTEM_PROMPT,
+)
 from agentforge.tools import news, weather, wikipedia
 
 logger = logging.getLogger(__name__)
@@ -81,6 +86,7 @@ def build_messages(user_id: str, user_input: str):
 
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": SPOTLIGHT_INSTRUCTIONS},
         {
             "role": "system",
             "content": f"{MEMORY_INSTRUCTIONS}\n\nRelevant memories:\n{memories}",

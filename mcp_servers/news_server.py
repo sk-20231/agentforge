@@ -11,14 +11,11 @@ mcp = FastMCP("news-server")
 @mcp.tool()
 def get_top_news(topic: str) -> str:
     """Search HackerNews for recent top stories on a topic. Returns up to 5 stories with titles, points, and source domains. Use for tech news and developer-focused topics."""
-    result = _get_top_news(topic)
-    # Uniform rule across all our MCP servers: a successful result is always
-    # wrapped in <untrusted_data>. Anything else (error string, no-stories-found)
-    # is raised so FastMCP reports it as isError:true — an LLM-recoverable tool
-    # error, not a protocol error.
-    if not result.startswith("<untrusted_data"):
-        raise ValueError(result)
-    return result
+    # The tool function returns raw, sanitized text on success and *raises* on
+    # any failure; FastMCP maps the raised exception to isError:true (an
+    # LLM-recoverable tool error). The MCP gateway — not this server — wraps the
+    # result as untrusted data with the turn's nonce (Step 17e).
+    return _get_top_news(topic)
 
 
 if __name__ == "__main__":

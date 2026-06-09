@@ -11,14 +11,11 @@ mcp = FastMCP("weather-server")
 @mcp.tool()
 def get_weather(city: str) -> str:
     """Get current weather (temperature, conditions, wind) for a city by name."""
-    result = _get_weather(city)
-    # Uniform rule across all our MCP servers: a successful result is always
-    # wrapped in <untrusted_data>. Anything else (error string, city-not-found)
-    # is raised so FastMCP reports it as isError:true — an LLM-recoverable tool
-    # error, not a protocol error.
-    if not result.startswith("<untrusted_data"):
-        raise ValueError(result)
-    return result
+    # The tool function returns raw, sanitized text on success and *raises* on
+    # any failure; FastMCP maps the raised exception to isError:true (an
+    # LLM-recoverable tool error). The MCP gateway — not this server — wraps the
+    # result as untrusted data with the turn's nonce (Step 17e).
+    return _get_weather(city)
 
 
 if __name__ == "__main__":

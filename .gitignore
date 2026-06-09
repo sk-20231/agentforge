@@ -29,6 +29,7 @@ htmlcov/
 agent_logs.jsonl
 corpus.json
 memory.json
+tool_pins.json
 /memory/
 
 # Local test scratch — files generated for manual/edge-case testing only.

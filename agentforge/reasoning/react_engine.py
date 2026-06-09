@@ -114,8 +114,10 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5) -
 
                 # Dispatch over MCP. gw.call returns a readable error string for
                 # unknown/hallucinated tools (it does not raise), so the model can
-                # observe the error and recover on the next step. Tool output is
-                # already wrapped <untrusted_data> by the server (see _safety.py).
+                # observe the error and recover on the next step. gw.call also
+                # wraps the tool output as untrusted data with this turn's nonce
+                # (Step 17e) — the spotlight rule in the prompt tells the model to
+                # treat anything inside those markers as data, never instructions.
                 observation = await gw.call(tool_name, tool_input)
 
                 messages.append({

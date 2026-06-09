@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from agentforge.tools._safety import extract_domain, sanitize_text, wrap_untrusted
+from agentforge.tools._safety import extract_domain, sanitize_text
 
 logger = logging.getLogger(__name__)
 
@@ -22,12 +22,18 @@ DEFAULT_HITS_PER_PAGE = 5
 
 
 def get_top_news(topic: str) -> str:
-    """Return top HN stories for a topic as a compact, sanitized list."""
-    logger.info("HN news lookup invoked for topic: %s", topic)
-    try:
-        if not topic or not isinstance(topic, str):
-            return "Error: topic must be a non-empty string"
+    """Return top HN stories for a topic as a compact, sanitized list.
 
+    Returns raw, *sanitized* text on success; RAISES (``ValueError``) on failure
+    so the MCP server reports ``isError: true``. It no longer wraps the result —
+    the MCP gateway wraps tool output as untrusted data with the turn's nonce
+    (Step 17e). Per-title sanitization (titles are user-submitted) stays here.
+    """
+    logger.info("HN news lookup invoked for topic: %s", topic)
+    if not topic or not isinstance(topic, str):
+        raise ValueError("topic must be a non-empty string")
+
+    try:
         params = urllib.parse.urlencode({
             "query": topic.strip(),
             "tags": "story",
@@ -43,7 +49,7 @@ def get_top_news(topic: str) -> str:
 
         hits = data.get("hits") or []
         if not hits:
-            return f"No recent HN stories found for '{topic}'"
+            raise ValueError(f"No recent HN stories found for '{topic}'")
 
         clean_topic = sanitize_text(topic, 60)
         lines = [f"Top HN stories for '{clean_topic}':"]
@@ -56,14 +62,12 @@ def get_top_news(topic: str) -> str:
             domain_suffix = f" — {domain}" if domain else ""
             lines.append(f"{i}. {title} ({points} pts){domain_suffix}")
 
-        return wrap_untrusted("\n".join(lines), source="HackerNews")
+        return "\n".join(lines)
 
     except urllib.error.HTTPError as e:
-        return f"HN API error (HTTP {e.code}) for '{topic}'"
+        raise ValueError(f"HN API error (HTTP {e.code}) for '{topic}'") from e
     except urllib.error.URLError as e:
-        return f"Could not reach HN search: {e.reason}"
-    except Exception as e:
-        return f"Error looking up news for '{topic}': {e}"
+        raise ValueError(f"Could not reach HN search: {e.reason}") from e
 
 
 TOOL_FUNCTION = get_top_news

@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from agentforge.tools._safety import sanitize_text, wrap_untrusted
+from agentforge.tools._safety import sanitize_text
 
 logger = logging.getLogger(__name__)
 
@@ -83,15 +83,21 @@ def _c_to_f(celsius: float) -> int:
 
 
 def get_weather(city: str) -> str:
-    """Return current weather for a city as a compact one-line string."""
-    logger.info("Weather lookup invoked for city: %s", city)
-    try:
-        if not city or not isinstance(city, str):
-            return "Error: city must be a non-empty string"
+    """Return current weather for a city as a compact one-line string.
 
+    Returns raw, *sanitized* text on success; RAISES (``ValueError``) on failure
+    so the MCP server reports ``isError: true``. It no longer wraps the result —
+    the MCP gateway wraps tool output as untrusted data with the turn's nonce
+    (Step 17e). Sanitization of the external display name stays here.
+    """
+    logger.info("Weather lookup invoked for city: %s", city)
+    if not city or not isinstance(city, str):
+        raise ValueError("city must be a non-empty string")
+
+    try:
         geo = _geocode(city.strip())
         if geo is None:
-            return f"No weather data found for '{city}' (city not recognized)"
+            raise ValueError(f"No weather data found for '{city}' (city not recognized)")
         lat, lon, display = geo
 
         params = urllib.parse.urlencode({
@@ -108,27 +114,22 @@ def get_weather(city: str) -> str:
         wind = current.get("wind_speed_10m")
 
         if temp_c is None or code is None:
-            return f"Weather data incomplete for '{display}'"
+            raise ValueError(f"Weather data incomplete for '{display}'")
 
         description = WEATHER_CODES.get(int(code), f"weather code {code}")
         temp_f = _c_to_f(temp_c)
         wind_str = f", wind {round(wind)} km/h" if wind is not None else ""
 
         # The city display name comes from the external geocoding API, so it is
-        # untrusted text. Sanitize it and wrap the whole summary as untrusted_data
-        # so every MCP-backed tool follows one uniform rule (Step 17c.1): a
-        # successful result is always <untrusted_data>-wrapped; anything else is
-        # an error the server turns into isError:true.
+        # untrusted text — sanitize it. The gateway wraps the whole summary as
+        # untrusted data (Step 17e); this function just returns the raw summary.
         clean_display = sanitize_text(display, 100)
-        summary = f"{clean_display}: {round(temp_c)}°C ({temp_f}°F), {description}{wind_str}"
-        return wrap_untrusted(summary, source="open-meteo")
+        return f"{clean_display}: {round(temp_c)}°C ({temp_f}°F), {description}{wind_str}"
 
     except urllib.error.HTTPError as e:
-        return f"Weather API error (HTTP {e.code}) for '{city}'"
+        raise ValueError(f"Weather API error (HTTP {e.code}) for '{city}'") from e
     except urllib.error.URLError as e:
-        return f"Could not reach weather service: {e.reason}"
-    except Exception as e:
-        return f"Error looking up weather for '{city}': {e}"
+        raise ValueError(f"Could not reach weather service: {e.reason}") from e
 
 
 TOOL_FUNCTION = get_weather

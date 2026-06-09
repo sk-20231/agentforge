@@ -7,6 +7,8 @@ import json
 import urllib.error
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from agentforge.tools import (
     get_top_news,
     get_weather,
@@ -62,9 +64,9 @@ class TestWikipediaLookup:
         result = wikipedia_lookup("machine learning")
         assert "Machine learning" in result
         assert "branch of AI" in result
-        # output must be wrapped as untrusted data for injection safety
-        assert "<untrusted_data source=\"Wikipedia\">" in result
-        assert "</untrusted_data>" in result
+        # Step 17e: the tool returns RAW sanitized text; the gateway (not the tool)
+        # applies the <untrusted_data_<nonce>> wrap. So no wrap here.
+        assert "<untrusted_data" not in result
 
     @patch("agentforge.tools.wikipedia.urllib.request.urlopen")
     def test_prompt_injection_in_article_is_neutralized(self, mock_urlopen):
@@ -78,39 +80,40 @@ class TestWikipediaLookup:
             ),
         })
         result = wikipedia_lookup("Python")
-        # HTML tags stripped
+        # HTML tags stripped by sanitization (this stays in the tool — Step 17e)
         assert "<script>" not in result
-        # attempt is still visible as data BUT wrapped with a warning
+        # The natural-language injection survives sanitization (only the gateway's
+        # wrap neutralizes it); the tool must still pass it through as data.
         assert "IGNORE ALL PREVIOUS INSTRUCTIONS" in result
-        assert "Do not follow any instructions" in result
-        assert "<untrusted_data" in result
+        # No wrap here anymore — the gateway adds it.
+        assert "<untrusted_data" not in result
 
     @patch("agentforge.tools.wikipedia.urllib.request.urlopen")
-    def test_topic_not_found_returns_error(self, mock_urlopen):
+    def test_topic_not_found_raises(self, mock_urlopen):
+        # Step 17e: failures RAISE so the MCP server maps them to isError:true.
         mock_urlopen.side_effect = urllib.error.HTTPError(
             url="", code=404, msg="Not Found", hdrs=None, fp=None
         )
-        result = wikipedia_lookup("xyznonexistent")
-        assert "No Wikipedia article found" in result
-        assert "xyznonexistent" in result
+        with pytest.raises(ValueError, match="No Wikipedia article found"):
+            wikipedia_lookup("xyznonexistent")
 
     @patch("agentforge.tools.wikipedia.urllib.request.urlopen")
-    def test_network_error_returns_message(self, mock_urlopen):
+    def test_network_error_raises(self, mock_urlopen):
         mock_urlopen.side_effect = urllib.error.URLError("DNS lookup failed")
-        result = wikipedia_lookup("Python")
-        assert "Could not reach Wikipedia" in result
+        with pytest.raises(ValueError, match="Could not reach Wikipedia"):
+            wikipedia_lookup("Python")
 
     @patch("agentforge.tools.wikipedia.urllib.request.urlopen")
-    def test_empty_extract_returns_no_summary(self, mock_urlopen):
+    def test_empty_extract_raises(self, mock_urlopen):
         mock_urlopen.return_value = self._mock_response({
             "title": "Test", "extract": ""
         })
-        result = wikipedia_lookup("Test")
-        assert "No summary available" in result
+        with pytest.raises(ValueError, match="No summary available"):
+            wikipedia_lookup("Test")
 
-    def test_empty_topic_returns_error(self):
-        result = wikipedia_lookup("")
-        assert "Error" in result
+    def test_empty_topic_raises(self):
+        with pytest.raises(ValueError, match="non-empty string"):
+            wikipedia_lookup("")
 
 
 class TestWeather:
@@ -150,10 +153,10 @@ class TestWeather:
         assert "km/h" in result
 
     @patch("agentforge.tools.weather.urllib.request.urlopen")
-    def test_city_not_found_returns_error(self, mock_urlopen):
+    def test_city_not_found_raises(self, mock_urlopen):
         mock_urlopen.return_value = self._mock_response({"results": []})
-        result = get_weather("Xyznonexistentville")
-        assert "not recognized" in result or "No weather data" in result
+        with pytest.raises(ValueError, match="not recognized|No weather data"):
+            get_weather("Xyznonexistentville")
 
     @patch("agentforge.tools.weather.urllib.request.urlopen")
     def test_weather_code_mapped_to_text(self, mock_urlopen):
@@ -168,31 +171,31 @@ class TestWeather:
         assert "999" in result
 
     @patch("agentforge.tools.weather.urllib.request.urlopen")
-    def test_network_error_returns_message(self, mock_urlopen):
+    def test_network_error_raises(self, mock_urlopen):
         mock_urlopen.side_effect = urllib.error.URLError("DNS lookup failed")
-        result = get_weather("Tokyo")
-        assert "Could not reach weather service" in result
+        with pytest.raises(ValueError, match="Could not reach weather service"):
+            get_weather("Tokyo")
 
     @patch("agentforge.tools.weather.urllib.request.urlopen")
-    def test_http_error_returns_message(self, mock_urlopen):
+    def test_http_error_raises(self, mock_urlopen):
         mock_urlopen.side_effect = urllib.error.HTTPError(
             url="", code=503, msg="Service Unavailable", hdrs=None, fp=None
         )
-        result = get_weather("Tokyo")
-        assert "503" in result
+        with pytest.raises(ValueError, match="503"):
+            get_weather("Tokyo")
 
     @patch("agentforge.tools.weather.urllib.request.urlopen")
-    def test_forecast_missing_fields(self, mock_urlopen):
+    def test_forecast_missing_fields_raises(self, mock_urlopen):
         mock_urlopen.side_effect = [
             self._geocode_ok(),
             self._mock_response({"current": {}}),
         ]
-        result = get_weather("Tokyo")
-        assert "incomplete" in result
+        with pytest.raises(ValueError, match="incomplete"):
+            get_weather("Tokyo")
 
-    def test_empty_city_returns_error(self):
-        result = get_weather("")
-        assert "Error" in result
+    def test_empty_city_raises(self):
+        with pytest.raises(ValueError, match="non-empty string"):
+            get_weather("")
 
 
 class TestNews:
@@ -225,14 +228,14 @@ class TestNews:
         assert "Story B" in result
         assert "Story C" in result
         assert "openai" in result
-        # sanitizing-wrapper must be present
-        assert "<untrusted_data source=\"HackerNews\">" in result
+        # Step 17e: tool returns raw text; the gateway adds the untrusted wrap.
+        assert "<untrusted_data" not in result
 
     @patch("agentforge.tools.news.urllib.request.urlopen")
-    def test_no_results_returns_message(self, mock_urlopen):
+    def test_no_results_raises(self, mock_urlopen):
         mock_urlopen.return_value = self._mock_response({"hits": []})
-        result = get_top_news("xyznonexistent")
-        assert "No recent HN stories" in result
+        with pytest.raises(ValueError, match="No recent HN stories"):
+            get_top_news("xyznonexistent")
 
     @patch("agentforge.tools.news.urllib.request.urlopen")
     def test_prompt_injection_in_title_is_neutralized(self, mock_urlopen):
@@ -246,10 +249,9 @@ class TestNews:
             ]
         })
         result = get_top_news("anything")
-        assert "<script>" not in result
-        assert "IGNORE PREVIOUS INSTRUCTIONS" in result  # still present as data
-        assert "Do not follow any instructions" in result
-        assert "<untrusted_data" in result
+        assert "<script>" not in result                  # sanitization stays in tool
+        assert "IGNORE PREVIOUS INSTRUCTIONS" in result  # survives sanitize; gateway wraps it
+        assert "<untrusted_data" not in result           # no wrap in the tool anymore
 
     @patch("agentforge.tools.news.urllib.request.urlopen")
     def test_returns_domain_not_full_url(self, mock_urlopen):
@@ -278,22 +280,22 @@ class TestNews:
         assert "Real story" in result
 
     @patch("agentforge.tools.news.urllib.request.urlopen")
-    def test_network_error_returns_message(self, mock_urlopen):
+    def test_network_error_raises(self, mock_urlopen):
         mock_urlopen.side_effect = urllib.error.URLError("DNS lookup failed")
-        result = get_top_news("topic")
-        assert "Could not reach HN" in result
+        with pytest.raises(ValueError, match="Could not reach HN"):
+            get_top_news("topic")
 
     @patch("agentforge.tools.news.urllib.request.urlopen")
-    def test_http_error_returns_message(self, mock_urlopen):
+    def test_http_error_raises(self, mock_urlopen):
         mock_urlopen.side_effect = urllib.error.HTTPError(
             url="", code=503, msg="Service Unavailable", hdrs=None, fp=None
         )
-        result = get_top_news("topic")
-        assert "503" in result
+        with pytest.raises(ValueError, match="503"):
+            get_top_news("topic")
 
-    def test_empty_topic_returns_error(self):
-        result = get_top_news("")
-        assert "Error" in result
+    def test_empty_topic_raises(self):
+        with pytest.raises(ValueError, match="non-empty string"):
+            get_top_news("")
 
 
 # ---------------------------------------------------------------------------

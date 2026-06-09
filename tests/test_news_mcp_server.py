@@ -89,8 +89,9 @@ def test_tool_error_on_invalid_input():
     assert result.isError is True, "Expected isError: true for empty topic"
 
 
-def test_tool_success_wraps_result_as_untrusted():
-    """tools/call with a real topic must return isError: false and an untrusted_data tag."""
+def test_tool_success_returns_raw_unwrapped_text():
+    """Step 17e: the server returns RAW sanitized text on success — the MCP gateway
+    (not the server) applies the <untrusted_data_<nonce>> wrap."""
     async def _run_inner():
         async with stdio_client(_params()) as (read, write):
             async with ClientSession(read, write) as session:
@@ -102,4 +103,5 @@ def test_tool_success_wraps_result_as_untrusted():
     if result.isError and _looks_transient(text):
         pytest.skip(f"HackerNews upstream unavailable, not a code failure: {text}")
     assert result.isError is False, "Expected isError: false for a real topic"
-    assert "<untrusted_data" in text, "Result must be wrapped in <untrusted_data> tag"
+    assert "HN stories" in text, "Expected real news content"
+    assert "<untrusted_data" not in text, "Server must NOT wrap — the gateway does (Step 17e)"

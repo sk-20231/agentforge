@@ -218,6 +218,58 @@ class TestReactToolDispatch:
     @patch("agentforge.reasoning.react_engine.log_event")
     @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
     @patch("agentforge.reasoning.react_engine._client")
+    def test_observation_fed_back_as_user_not_orphan_tool_role(self, mock_client, mock_mem, mock_log):
+        """Regression for issue #1: after a tool step the observation must go back
+        as a USER message, never a role:"tool" message.
+
+        A "tool" message is only legal in OpenAI's native function-calling protocol
+        (immediately after an assistant message carrying tool_calls). This loop uses
+        the JSON-prompt protocol, so an orphan "tool" message makes the *next*
+        request fail with a 400. The mocked client can't surface that 400 (the stub
+        accepts any messages), which is exactly why the original bug slipped through
+        — so this test asserts the message *structure* sent to the API directly."""
+        tool_step = json.dumps({
+            "thought": "look it up",
+            "action": {"type": "tool", "tool_name": "search_wikipedia", "tool_input": {"topic": "Ada Lovelace"}},
+            "reply": "",
+        })
+        final_step = json.dumps({
+            "thought": "now I can answer", "action": {"type": "final"},
+            "reply": "Ada Lovelace was a mathematician.",
+        })
+        msg1, msg2 = MagicMock(), MagicMock()
+        msg1.content, msg2.content = tool_step, final_step
+        mock_client.chat.completions.create.side_effect = [
+            MagicMock(choices=[MagicMock(message=msg1)]),
+            MagicMock(choices=[MagicMock(message=msg2)]),
+        ]
+
+        gw = _FakeGateway(
+            catalog=[{"name": "search_wikipedia", "description": "Look up a topic",
+                      "input_schema": {"properties": {"topic": {"type": "string"}}}}],
+            call_result="<untrusted_data_abc123>Ada Lovelace: a mathematician</untrusted_data_abc123>",
+        )
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(gw):
+            react_loop("u1", "who is Ada Lovelace", max_steps=3)
+
+        # The 2nd LLM call carries the post-tool message history. Under the
+        # JSON-prompt protocol none of those messages may use the "tool" role.
+        assert mock_client.chat.completions.create.call_count == 2
+        second_call_messages = mock_client.chat.completions.create.call_args_list[1].kwargs["messages"]
+        orphan_tool_msgs = [m for m in second_call_messages if m.get("role") == "tool"]
+        assert orphan_tool_msgs == [], (
+            "ReAct must feed observations back as a user message, not role:'tool' "
+            f"(OpenAI rejects an orphan 'tool' role). Found: {orphan_tool_msgs}"
+        )
+        # The observation must still be present — fed back as a user turn.
+        user_obs = [m for m in second_call_messages
+                    if m.get("role") == "user" and "Observation from tool" in m.get("content", "")]
+        assert user_obs, "the tool observation should be fed back as a user message"
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
     def test_unknown_tool_observation_is_recoverable(self, mock_client, mock_mem, mock_log):
         """An unknown tool returns a readable error from the gateway (not a raise),
         which the loop feeds back as an observation."""

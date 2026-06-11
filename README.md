@@ -155,6 +155,20 @@ AgentForge applies **three independent defence layers** at the tool boundary, ea
 
 The defences are tested with **deliberately malicious payloads** in [`tests/test_tools.py`](tests/test_tools.py). `test_prompt_injection_in_article_is_neutralized` simulates a vandalised Wikipedia article; `test_prompt_injection_in_title_is_neutralized` simulates an attacker-submitted HN title. Both verify the output is sanitized, wrapped, and visibly marked as data not instruction.
 
+### 5. Human-in-the-loop approval for high-impact tool calls
+
+Automated defences only catch *known-bad patterns* — a blocked private IP, a changed tool fingerprint. But some calls look legitimate to every rule and are still dangerous: a poisoned headline can steer the model into fetching an attacker's perfectly *public* URL with sensitive context encoded in the query string. No automated check distinguishes that from a legitimate fetch — only a human can.
+
+Following Meta's **"Agents Rule of Two"** (an agent session shouldn't combine untrusted input, private data, *and* external communication without oversight), AgentForge gates **open-world tool calls** — any tool from a server marked `requires_approval` (third-party servers are gated by default) — behind explicit human confirmation:
+
+- **The gate lives in the MCP gateway** ([`mcp_client.py`](agentforge/mcp_client.py)), the single trust boundary every tool call already passes through — the same architecture-fitness test that makes the gateway un-bypassable protects the gate for free.
+- **The gateway stays UI-ignorant** via dependency inversion ([`approval.py`](agentforge/approval.py)): it calls an injected `approval_handler`; the CLI supplies a blocking y/N prompt, Streamlit supplies an **interrupt → checkpoint → resume** flow (the script can't pause mid-run, so the handler raises, the loop's frozen state travels out on the exception, Allow/Deny buttons render, and the turn *resumes mid-flight* — the human's decision settles the **exact stored call**, never a regenerated one, because LLM output is non-deterministic and a replayed turn won't reproduce the same call).
+- **Deny is an observation, not a crash** — the model receives *"the user declined permission"* and adapts, the same recoverable-error contract as every other refusal.
+- **Fail-safe default:** no handler configured → gated calls are denied. Nothing silently auto-approves.
+- **Every request and decision is audited** (`approval_requested` / `approved` / `denied`) with argument *names* only — never values.
+
+This is the hand-rolled version of what LangGraph ships as `interrupt()` + a checkpointer; building it from primitives first is deliberate (see [Why this exists](#why-this-exists)).
+
 ---
 
 ## Project structure

@@ -38,7 +38,7 @@ class _FakeGateway:
 def _fake_gateway_cm(gw):
     """Return a drop-in replacement for the mcp_gateway async context manager."""
     @contextlib.asynccontextmanager
-    async def _cm(trace_id=None):
+    async def _cm(trace_id=None, approval_handler=None):
         yield gw
     return _cm
 

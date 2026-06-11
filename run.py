@@ -12,9 +12,33 @@ Streaming behaviour (Step 4):
   text from the generator so it can be stored in history and logged, just like
   the non-streaming paths.
 """
+import json
+
+from agentforge.approval import ApprovalRequest
 from agentforge.main import run_agent
 from agentforge.logger import log_event
 from agentforge.tools import prime_tool_catalog
+
+
+def cli_approval_handler(request: ApprovalRequest) -> bool:
+    """Human-in-the-loop gate for the CLI (Step 17f).
+
+    The terminal CAN block mid-turn, so this is the simple half of the approval
+    contract: print what the agent wants to do, read y/n, return the decision.
+    The arguments are shown in full — the human can only make an informed
+    decision if they can see exactly what would be sent (e.g. the URL a fetch
+    would request). Shown on screen only; the audit log records arg names, never
+    values. Default is DENY: anything but an explicit yes declines the call.
+
+    (Known limit, documented in mcp_client: input() blocks the event loop —
+    fine for a single-user CLI, revisit for the multi-user product.)
+    """
+    print("\n⚠️  The agent wants to call a gated tool:")
+    print(f"    tool:      {request.tool}")
+    print(f"    server:    {request.server}  (requires approval)")
+    print(f"    arguments: {json.dumps(request.arguments, ensure_ascii=False)}")
+    answer = input("    Allow this call? [y/N] ").strip().lower()
+    return answer in ("y", "yes")
 
 
 if __name__ == "__main__":
@@ -36,7 +60,9 @@ if __name__ == "__main__":
 
             # stream=True: ANSWER/RESPOND_WITH_MEMORY intents return a generator.
             # All other intents still return a plain str — no change for them.
-            result = run_agent(user_id, session_id, user_input, history=history, stream=True)
+            # approval_handler: gated tool calls (Step 17f) pause here for a y/n.
+            result = run_agent(user_id, session_id, user_input, history=history,
+                               stream=True, approval_handler=cli_approval_handler)
 
             if isinstance(result, str):
                 # Non-streaming intents (REMEMBER, ACT, REACT, DOCS_QA, IGNORE).

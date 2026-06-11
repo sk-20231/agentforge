@@ -65,7 +65,11 @@ _DUMMY_SERVERS = {"dummy": {"command": "python", "args": ["dummy/server.py"], "t
 
 # A third-party (untrusted) server: the gateway must guard its URL args and wrap
 # its output. Tests use numeric-IP URLs so is_safe_url needs no real DNS lookup.
-_UNTRUSTED_SERVERS = {"ext": {"command": "uvx", "args": ["some-tool"], "trusted": False}}
+# requires_approval is explicitly relaxed: these tests target the SSRF/wrap/pinning
+# behaviour, and untrusted servers are otherwise human-gated by default since
+# Step 17f. The approval gate has its own suite — tests/test_approval.py.
+_UNTRUSTED_SERVERS = {"ext": {"command": "uvx", "args": ["some-tool"], "trusted": False,
+                              "requires_approval": False}}
 
 
 def _run_with_gateway(session_mock, servers, body):

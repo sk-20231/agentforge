@@ -47,6 +47,13 @@ HISTORY_TOKEN_BUDGET = int(os.environ.get("HISTORY_TOKEN_BUDGET", "2000"))
 #   trusted : True for our own first-party servers; False for a third-party server
 #             we did not write. The gateway treats an untrusted server's output as
 #             untrusted data and guards its URL arguments against SSRF (Step 17d).
+#   requires_approval : when True, every call to this server's tools is gated
+#             behind human confirmation (Step 17f — least-privilege / Rule of Two).
+#             DEFAULTS TO ``not trusted``: a third-party server is gated unless
+#             explicitly relaxed; our first-party read-only servers are not.
+#             We own this flag deliberately — MCP's self-declared tool annotations
+#             (readOnlyHint / openWorldHint) come from the server and are
+#             untrusted input, so they don't get to decide.
 #
 # Add a new server by adding an entry here — no other code changes needed.
 from pathlib import Path as _Path

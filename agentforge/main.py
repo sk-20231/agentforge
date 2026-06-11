@@ -6,6 +6,7 @@ import json
 
 from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL, HISTORY_TOKEN_BUDGET
 from agentforge.tools import (
+    resume_tool_loop,
     run_llm_with_tools,
     tool_catalog_for_classifier,
 )
@@ -18,7 +19,7 @@ from agentforge.memory.semantic import (
 from agentforge.memory.response import answer_with_memory
 from agentforge.rag.qa import answer_from_docs
 from agentforge.logger import log_event, generate_trace_id, Span, log_token_usage
-from agentforge.reasoning.react_engine import react_loop
+from agentforge.reasoning.react_engine import react_loop, resume_react_loop
 from agentforge.conversation import trim_history, count_tokens
 
 _client = None  # created on first API call, not at import time
@@ -70,9 +71,10 @@ def stream_llm_answer(user_input: str, trace_id: str = None) -> Iterator[str]:
     logging.getLogger(__name__).debug("stream_llm_answer: yielded %d tokens.", token_count)
 
 
-def run_react_agent(user_id: str, user_input: str, max_steps: int = 5) -> str:
+def run_react_agent(user_id: str, user_input: str, max_steps: int = 5,
+                    approval_handler=None) -> str:
     """Delegates to the memory-aware ReAct loop."""
-    return react_loop(user_id, user_input, max_steps)
+    return react_loop(user_id, user_input, max_steps, approval_handler=approval_handler)
 
 VALID_INTENTS = frozenset({"REMEMBER", "ACT", "REACT", "ANSWER", "IGNORE", "RESPOND_WITH_MEMORY", "DOCS_QA"})
 
@@ -84,7 +86,16 @@ def run_agent(
     history: list[dict] = None,
     stream: bool = False,
     trace_id: str = None,
+    approval_handler=None,
 ) -> str | Iterator[str]:
+    # approval_handler (Step 17f): the front-end's human-in-the-loop callback for
+    # high-impact tool calls — see agentforge.approval. Threaded through to the
+    # MCP gateway by the ACT and REACT pipelines (the only tool-calling paths).
+    # None (the default, and every pre-17f caller) means gated tools are denied
+    # with a readable observation rather than silently auto-approved. If the
+    # handler raises ApprovalRequired it propagates out of this function by
+    # design — carrying the pipeline's continuation — and the front-end asks
+    # the human, then calls resume_agent(exc, decision) to finish the turn.
     # Trim history to the configured token budget before any LLM call.
     # We trim here — once, at the entry point — so every pipeline (ANSWER,
     # DOCS_QA, etc.) automatically receives a history that fits the budget.
@@ -138,7 +149,8 @@ def run_agent(
     # -------------------------------
     if intent == "ACT":
         with Span("act_tool_pipeline", trace_id=tid) as span:
-            tool_output = run_llm_with_tools(user_id, user_input, trace_id=tid)
+            tool_output = run_llm_with_tools(user_id, user_input, trace_id=tid,
+                                             approval_handler=approval_handler)
             try:
                 tool_output = json.loads(tool_output)
             except json.JSONDecodeError:
@@ -162,7 +174,8 @@ def run_agent(
     # -------------------------------
     if intent == "REACT":
         with Span("react_pipeline", trace_id=tid) as span:
-            result = run_react_agent(user_id, user_input)
+            result = run_react_agent(user_id, user_input,
+                                     approval_handler=approval_handler)
             span.payload = {"reply_length": len(result)}
         log_event("trace_end", {"intent": intent}, trace_id=tid)
         return result
@@ -186,6 +199,64 @@ def run_agent(
     # -------------------------------
     log_event("trace_end", {"intent": intent}, trace_id=tid)
     return "Okay 🙂"
+
+
+def resume_agent(interrupt, decision: bool, approval_handler=None) -> str:
+    """Resume a turn that was interrupted for human approval (Step 17f).
+
+    ``interrupt`` is the ApprovalRequired the front-end caught from run_agent;
+    its ``continuation`` (attached by the pipeline loop as the exception
+    unwound) tells us which pipeline to re-enter and carries its frozen state.
+    ``decision`` is the human's Allow/Deny for ``interrupt.request``. The
+    decision settles ONLY that stored call (one-shot); any new gated call the
+    resumed turn makes goes back through ``approval_handler`` and can interrupt
+    again — each interrupt gets its own decision.
+
+    No intent re-classification happens here — the original classification is
+    part of the frozen turn. That (plus not re-running earlier loop steps) is
+    why resume is both cheaper and more correct than replaying the turn:
+    a replay would ask the non-deterministic LLM to regenerate the approved
+    call and hope it matches.
+    """
+    cont = getattr(interrupt, "continuation", None)
+    if not cont:
+        raise ValueError("This interrupt carries no continuation and cannot be resumed.")
+    tid = cont.get("trace_id")
+    log_event("resume_start", {
+        "pipeline": cont["pipeline"],
+        "tool": interrupt.request.tool,
+        "decision": "approved" if decision else "denied",
+    }, trace_id=tid)
+
+    if cont["pipeline"] == "react":
+        with Span("react_pipeline_resume", trace_id=tid) as span:
+            result = resume_react_loop(interrupt, decision,
+                                       approval_handler=approval_handler)
+            span.payload = {"reply_length": len(result)}
+        log_event("trace_end", {"intent": "REACT", "resumed": True}, trace_id=tid)
+        return result
+
+    if cont["pipeline"] == "act":
+        # Same post-processing contract as run_agent's ACT branch: the loop
+        # returns a JSON string with reply / store_memory / memory_text.
+        with Span("act_tool_pipeline_resume", trace_id=tid) as span:
+            tool_output = resume_tool_loop(interrupt, decision,
+                                           approval_handler=approval_handler)
+            try:
+                parsed = json.loads(tool_output)
+            except json.JSONDecodeError:
+                span.payload = {"error": "invalid_json"}
+                log_event("trace_end", {"intent": "ACT", "resumed": True, "error": True},
+                          trace_id=tid)
+                return "Agent error: invalid tool response."
+            reply = parsed.get("reply", "")
+            span.payload = {"reply_length": len(reply)}
+        if parsed.get("store_memory") and parsed.get("memory_text"):
+            store_memory(cont["user_id"], parsed["memory_text"])
+        log_event("trace_end", {"intent": "ACT", "resumed": True}, trace_id=tid)
+        return reply
+
+    raise ValueError(f"Unknown pipeline in continuation: {cont['pipeline']!r}")
 
 
 # -------------------------------

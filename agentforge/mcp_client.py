@@ -49,6 +49,7 @@ from mcp.client.stdio import (
     stdio_client,
 )
 
+from agentforge.approval import ApprovalHandler, ApprovalRequest
 from agentforge.config import MCP_SERVERS, AGENT_TOOL_PINS_FILE
 from agentforge.logger import log_event
 from agentforge.safety import (
@@ -119,14 +120,20 @@ class MCPGateway:
     and ``await gw.call(name, args)`` dispatches one tool call.
     """
 
-    def __init__(self, trace_id: Optional[str] = None):
+    def __init__(self, trace_id: Optional[str] = None,
+                 approval_handler: Optional[ApprovalHandler] = None):
         self.trace_id = trace_id
+        # Front-end-supplied human-in-the-loop callback (Step 17f). None means
+        # "no way to ask a human" — gated calls are then DENIED by default;
+        # nothing silently auto-approves.
+        self.approval_handler = approval_handler
         # One unguessable nonce per turn. Every untrusted-data wrap this gateway
         # emits uses it, so attacker-controlled tool output can't forge the
         # closing delimiter (Step 17e spotlighting).
         self.nonce = new_spotlight_nonce()
         self._sessions: Dict[str, Any] = {}        # tool_name -> live ClientSession
         self._trusted: Dict[str, bool] = {}        # tool_name -> is its server trusted?
+        self._requires_approval: Dict[str, bool] = {}  # tool_name -> gate behind a human? (17f)
         self._server_of: Dict[str, str] = {}       # tool_name -> server name (for logging)
         self._blocked: Dict[str, str] = {}         # tool_name -> reason it was refused (17e C)
         self.catalog: List[dict] = []              # [{name, description, input_schema}]
@@ -158,13 +165,17 @@ class MCPGateway:
                 command=cfg["command"], args=cfg.get("args", []), env=env
             )
             trusted = bool(cfg.get("trusted", False))
+            # Step 17f: gate this server's calls behind a human? Defaults to
+            # "yes for third-party servers, no for our own" (see config.py).
+            requires_approval = bool(cfg.get("requires_approval", not trusted))
             try:
                 read, write = await stack.enter_async_context(stdio_client(params))
                 session = await stack.enter_async_context(ClientSession(read, write))
                 await session.initialize()
                 tools_result = await session.list_tools()
                 for tool in tools_result.tools:
-                    if self._register_tool(tool, session, name, trusted, pins):
+                    if self._register_tool(tool, session, name, trusted, pins,
+                                           requires_approval=requires_approval):
                         pins_changed = True
                 log_event(
                     "mcp_discovery",
@@ -181,7 +192,8 @@ class MCPGateway:
         if pins_changed:
             _save_pins(pins)
 
-    def _register_tool(self, tool, session, server: str, trusted: bool, pins: Dict[str, str]) -> bool:
+    def _register_tool(self, tool, session, server: str, trusted: bool, pins: Dict[str, str],
+                       requires_approval: bool = False) -> bool:
         """Vet one discovered tool and register it (Step 17e gap C).
 
         Refuses (does not register, so the model never sees it) a tool that is:
@@ -231,6 +243,7 @@ class MCPGateway:
         # 4. Passed all checks — register it.
         self._sessions[tname] = session
         self._trusted[tname] = trusted
+        self._requires_approval[tname] = requires_approval
         self._server_of[tname] = server
         self.catalog.append({"name": tname, "description": description, "input_schema": tool.inputSchema})
         self.openai_schemas.append(mcp_tool_to_openai_schema(tool, description=description))
@@ -319,6 +332,32 @@ class MCPGateway:
                 self._audit(tool_name, server, trusted, arg_keys, "url_blocked", reason=reason)
                 return f"Error: refused to request '{url}' — {reason}"
 
+        # Step 17f — human-in-the-loop gate (after the automated guards, so a
+        # human is never asked to bless a call SSRF/pinning would refuse anyway).
+        # Automated checks catch known-bad patterns; this gate covers the calls
+        # that look legitimate to every rule but only a human can judge (e.g.
+        # fetch of an attacker's *public* URL carrying exfiltrated context).
+        # The handler may raise ApprovalRequired — that deliberately unwinds the
+        # turn so a front-end that can't block (Streamlit) can ask via its own
+        # UI and replay; it must not be caught here.
+        if self._requires_approval.get(tool_name, False):
+            request = ApprovalRequest(tool=tool_name, server=server,
+                                      arguments=arguments or {})
+            self._audit(tool_name, server, trusted, arg_keys, "approval_requested")
+            if self.approval_handler is None:
+                # No way to ask a human -> deny by default. A readable string,
+                # not an exception, so the model can observe and adapt.
+                self._audit(tool_name, server, trusted, arg_keys, "denied",
+                            reason="no approval handler configured")
+                return (f"Error: tool '{tool_name}' requires human approval and no "
+                        f"approval handler is configured — the call was not made.")
+            if not self.approval_handler(request):
+                self._audit(tool_name, server, trusted, arg_keys, "denied",
+                            reason="user declined")
+                return (f"Error: the user declined permission for tool "
+                        f"'{tool_name}' — the call was not made.")
+            self._audit(tool_name, server, trusted, arg_keys, "approved")
+
         start = time.perf_counter()
         try:
             result = await session.call_tool(tool_name, arguments)
@@ -370,7 +409,8 @@ class MCPGateway:
 
 
 @contextlib.asynccontextmanager
-async def mcp_gateway(trace_id: Optional[str] = None):
+async def mcp_gateway(trace_id: Optional[str] = None,
+                      approval_handler: Optional[ApprovalHandler] = None):
     """Open an :class:`MCPGateway` for one agent turn, then tear it down.
 
     Usage::
@@ -383,8 +423,11 @@ async def mcp_gateway(trace_id: Optional[str] = None):
     ``AsyncExitStack`` driven inside this generator (entered and exited from the
     caller's task) keeps the MCP SDK's anyio cancel scopes in one task — the same
     proven pattern the original inline ACT loop used.
+
+    ``approval_handler`` is the front-end's human-in-the-loop callback (Step
+    17f); see ``agentforge.approval``. Omitted → gated tools are denied.
     """
-    gw = MCPGateway(trace_id)
+    gw = MCPGateway(trace_id, approval_handler=approval_handler)
     async with contextlib.AsyncExitStack() as stack:
         await gw._discover(stack)
         yield gw

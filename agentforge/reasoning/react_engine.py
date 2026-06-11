@@ -1,10 +1,14 @@
 # agent/reasoning/react_engine.py
 
-import asyncio
 import json
 import logging
 from openai import OpenAI
 
+from agentforge.approval import (
+    ApprovalRequired,
+    make_resume_handler,
+    run_interruptible,
+)
 from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
 from agentforge.prompts import build_prompt, render_tool_catalog, OUTPUT_SCHEMA
 from agentforge.mcp_client import mcp_gateway
@@ -22,18 +26,38 @@ def _get_client():
 logger = logging.getLogger(__name__)
 
 
-def react_loop(user_id: str, user_input: str, max_steps: int = 5) -> str:
+def react_loop(user_id: str, user_input: str, max_steps: int = 5,
+               approval_handler=None) -> str:
     """Core ReAct reasoning loop (think → act → observe → repeat).
 
-    Public entry point. The signature is unchanged from before Step 17c.2, so
-    callers (main.py) are unaffected; internally it now runs an async loop because
-    tools are reached over MCP. One MCP gateway is opened for the whole turn (see
-    ``_react_loop_async``).
+    Public entry point. Existing positional args are unchanged, so callers
+    (main.py) are unaffected; internally it runs an async loop because tools are
+    reached over MCP. One MCP gateway is opened for the whole turn (see
+    ``_react_loop_async``). ``approval_handler`` is the front-end's
+    human-in-the-loop callback (Step 17f), passed through to the gateway.
     """
-    return asyncio.run(_react_loop_async(user_id, user_input, max_steps))
+    return run_interruptible(_react_loop_async(user_id, user_input, max_steps,
+                                               approval_handler=approval_handler))
 
 
-async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5) -> str:
+def resume_react_loop(interrupt: ApprovalRequired, decision: bool,
+                      approval_handler=None) -> str:
+    """Resume a ReAct turn that was interrupted for human approval (Step 17f).
+
+    ``interrupt`` is the ApprovalRequired the front-end caught — its
+    ``continuation`` holds the frozen loop state. ``decision`` is the human's
+    Allow (True) / Deny (False) for the stored pending call. Resume — not
+    replay — so the decision settles the EXACT call the human looked at; the
+    LLM is never asked to regenerate it (it wouldn't reproduce the same
+    arguments — LLM output is non-deterministic). A Deny resumes too: the model
+    receives the "user declined" observation and adapts.
+    """
+    return run_interruptible(
+        _react_resume_async(interrupt, decision, approval_handler))
+
+
+async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5,
+                            approval_handler=None) -> str:
     """Async ReAct loop with tools served over MCP (Step 17c.2).
 
     What changed from the pre-MCP loop:
@@ -54,7 +78,7 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5) -
     memory_chunks = get_relevant_memories(user_id, user_input)
     log_event("react_start", {"user_input": user_input, "max_steps": max_steps})
 
-    async with mcp_gateway() as gw:
+    async with mcp_gateway(approval_handler=approval_handler) as gw:
         # Build the prompt once, injecting the live tool catalog so the model can
         # only reference tools that are actually served this turn.
         messages = build_prompt(user_input, memory_chunks)
@@ -62,7 +86,57 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5) -
         messages.append({"role": "system", "content": OUTPUT_SCHEMA})
         log_event("react_tools_discovered", {"tools": [t["name"] for t in gw.catalog]})
 
-        for step in range(max_steps):
+        return await _react_steps(gw, messages, user_id, 0, max_steps)
+
+
+async def _react_resume_async(interrupt: ApprovalRequired, decision: bool,
+                              fallback=None) -> str:
+    """Re-enter an interrupted ReAct turn mid-flight (Step 17f resume).
+
+    Opens a fresh gateway (the original's server subprocesses died when the
+    interrupt unwound the turn), settles the STORED pending call with the
+    human's decision via a one-shot handler, appends the resulting observation
+    to the frozen messages, and continues the loop from the next step. Later
+    gated calls go to ``fallback`` (the front-end's normal handler) and can
+    interrupt again — each gets its own card.
+    """
+    cont = interrupt.continuation
+    handler = make_resume_handler(decision, interrupt.request, fallback)
+    log_event("react_resume", {
+        "step": cont["step"] + 1,
+        "tool": cont["tool_name"],
+        "decision": "approved" if decision else "denied",
+    })
+
+    async with mcp_gateway(approval_handler=handler) as gw:
+        # Finish the interrupted step: dispatch (or deny) the stored call.
+        # The one-shot handler answers it without raising; gw.call's normal
+        # contract applies (wrap on success, declined-string on deny).
+        try:
+            observation = await gw.call(cont["tool_name"], cont["tool_input"])
+        except ApprovalRequired as exc:
+            exc.continuation = cont  # defensive: keep the turn resumable
+            raise
+
+        messages = cont["messages"]
+        messages.append({"role": "assistant", "content": cont["raw"]})
+        messages.append({
+            "role": "user",
+            "content": f"Observation from tool '{cont['tool_name']}':\n{observation}"
+        })
+        return await _react_steps(gw, messages, cont["user_id"],
+                                  cont["step"] + 1, cont["max_steps"])
+
+
+async def _react_steps(gw, messages: list, user_id: str,
+                       start_step: int, max_steps: int) -> str:
+    """The think → act → observe loop body, shared by fresh runs and resumes.
+
+    ``start_step`` is 0 for a fresh turn; a resume passes the interrupted
+    step + 1 (the interrupted step itself is finished by the resume path
+    before re-entering here).
+    """
+    for step in range(start_step, max_steps):
             try:
                 response = _get_client().chat.completions.create(
                     model=OPENAI_MODEL,
@@ -118,7 +192,24 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5) -
                 # wraps the tool output as untrusted data with this turn's nonce
                 # (Step 17e) — the spotlight rule in the prompt tells the model to
                 # treat anything inside those markers as data, never instructions.
-                observation = await gw.call(tool_name, tool_input)
+                try:
+                    observation = await gw.call(tool_name, tool_input)
+                except ApprovalRequired as exc:
+                    # CHECKPOINT (Step 17f): the human must decide. Attach
+                    # everything resume needs to finish this step and continue
+                    # the loop — the loop owns this state, the gateway doesn't.
+                    # The exception object travels to the front-end intact.
+                    exc.continuation = {
+                        "pipeline": "react",
+                        "user_id": user_id,
+                        "messages": messages,
+                        "step": step,
+                        "raw": raw,
+                        "tool_name": tool_name,
+                        "tool_input": tool_input,
+                        "max_steps": max_steps,
+                    }
+                    raise
 
                 # The ReAct loop speaks the prompt-based JSON protocol: the model
                 # returns {thought, action} as assistant *content*, not native
@@ -143,5 +234,5 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5) -
                     "content": f"Observation from tool '{tool_name}':\n{observation}"
                 })
 
-        log_event("react_end", {"steps_taken": max_steps, "reply_length": 0, "stopped": "max_steps"})
-        return "Agent stopped: too many reasoning steps."
+    log_event("react_end", {"steps_taken": max_steps, "reply_length": 0, "stopped": "max_steps"})
+    return "Agent stopped: too many reasoning steps."

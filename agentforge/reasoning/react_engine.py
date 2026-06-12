@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 def react_loop(user_id: str, user_input: str, max_steps: int = 5,
-               approval_handler=None) -> str:
+               approval_handler=None, trace_id: str = None) -> str:
     """Core ReAct reasoning loop (think → act → observe → repeat).
 
     Public entry point. Existing positional args are unchanged, so callers
@@ -35,9 +35,14 @@ def react_loop(user_id: str, user_input: str, max_steps: int = 5,
     reached over MCP. One MCP gateway is opened for the whole turn (see
     ``_react_loop_async``). ``approval_handler`` is the front-end's
     human-in-the-loop callback (Step 17f), passed through to the gateway.
+    ``trace_id`` is the turn's trace ID from run_agent (issue #7): without it,
+    every log record this module emits — token usage, react_* events, the
+    gateway's security audit entries — is orphaned from its turn, so per-trace
+    cost aggregation undercounts REACT turns.
     """
     return run_interruptible(_react_loop_async(user_id, user_input, max_steps,
-                                               approval_handler=approval_handler))
+                                               approval_handler=approval_handler,
+                                               trace_id=trace_id))
 
 
 def resume_react_loop(interrupt: ApprovalRequired, decision: bool,
@@ -57,7 +62,7 @@ def resume_react_loop(interrupt: ApprovalRequired, decision: bool,
 
 
 async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5,
-                            approval_handler=None) -> str:
+                            approval_handler=None, trace_id: str = None) -> str:
     """Async ReAct loop with tools served over MCP (Step 17c.2).
 
     What changed from the pre-MCP loop:
@@ -76,17 +81,20 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5,
     correct keys or values.
     """
     memory_chunks = get_relevant_memories(user_id, user_input)
-    log_event("react_start", {"user_input": user_input, "max_steps": max_steps})
+    log_event("react_start", {"user_input": user_input, "max_steps": max_steps},
+              trace_id=trace_id)
 
-    async with mcp_gateway(approval_handler=approval_handler) as gw:
+    async with mcp_gateway(trace_id, approval_handler=approval_handler) as gw:
         # Build the prompt once, injecting the live tool catalog so the model can
         # only reference tools that are actually served this turn.
         messages = build_prompt(user_input, memory_chunks)
         messages.append({"role": "system", "content": render_tool_catalog(gw.catalog)})
         messages.append({"role": "system", "content": OUTPUT_SCHEMA})
-        log_event("react_tools_discovered", {"tools": [t["name"] for t in gw.catalog]})
+        log_event("react_tools_discovered", {"tools": [t["name"] for t in gw.catalog]},
+                  trace_id=trace_id)
 
-        return await _react_steps(gw, messages, user_id, 0, max_steps)
+        return await _react_steps(gw, messages, user_id, 0, max_steps,
+                                  trace_id=trace_id)
 
 
 async def _react_resume_async(interrupt: ApprovalRequired, decision: bool,
@@ -101,14 +109,15 @@ async def _react_resume_async(interrupt: ApprovalRequired, decision: bool,
     interrupt again — each gets its own card.
     """
     cont = interrupt.continuation
+    trace_id = cont.get("trace_id")  # frozen with the turn at interrupt time
     handler = make_resume_handler(decision, interrupt.request, fallback)
     log_event("react_resume", {
         "step": cont["step"] + 1,
         "tool": cont["tool_name"],
         "decision": "approved" if decision else "denied",
-    })
+    }, trace_id=trace_id)
 
-    async with mcp_gateway(approval_handler=handler) as gw:
+    async with mcp_gateway(trace_id, approval_handler=handler) as gw:
         # Finish the interrupted step: dispatch (or deny) the stored call.
         # The one-shot handler answers it without raising; gw.call's normal
         # contract applies (wrap on success, declined-string on deny).
@@ -125,11 +134,13 @@ async def _react_resume_async(interrupt: ApprovalRequired, decision: bool,
             "content": f"Observation from tool '{cont['tool_name']}':\n{observation}"
         })
         return await _react_steps(gw, messages, cont["user_id"],
-                                  cont["step"] + 1, cont["max_steps"])
+                                  cont["step"] + 1, cont["max_steps"],
+                                  trace_id=trace_id)
 
 
 async def _react_steps(gw, messages: list, user_id: str,
-                       start_step: int, max_steps: int) -> str:
+                       start_step: int, max_steps: int,
+                       trace_id: str = None) -> str:
     """The think → act → observe loop body, shared by fresh runs and resumes.
 
     ``start_step`` is 0 for a fresh turn; a resume passes the interrupted
@@ -147,7 +158,8 @@ async def _react_steps(gw, messages: list, user_id: str,
                     # this — and more costly, since they abort a reasoning chain.
                     response_format={"type": "json_object"},
                 )
-                log_token_usage(response, f"react_step_{step + 1}")
+                log_token_usage(response, f"react_step_{step + 1}",
+                                trace_id=trace_id)
                 raw = response.choices[0].message.content
             except Exception as e:
                 logger.error("react_loop: LLM call failed on step %d: %s", step + 1, e, exc_info=True)
@@ -170,7 +182,7 @@ async def _react_steps(gw, messages: list, user_id: str,
                 "thought": thought,
                 "action_type": action.get("type"),
                 "tool_name": action.get("tool_name"),
-            })
+            }, trace_id=trace_id)
 
             # ---------- FINAL ----------
             if action.get("type") == "final":
@@ -178,7 +190,8 @@ async def _react_steps(gw, messages: list, user_id: str,
                     store_memory(user_id, data["memory_text"])
 
                 reply = data.get("reply", "")
-                log_event("react_end", {"steps_taken": step + 1, "reply_length": len(reply)})
+                log_event("react_end", {"steps_taken": step + 1, "reply_length": len(reply)},
+                          trace_id=trace_id)
                 return reply
 
             # ---------- TOOL ----------
@@ -208,6 +221,10 @@ async def _react_steps(gw, messages: list, user_id: str,
                         "tool_name": tool_name,
                         "tool_input": tool_input,
                         "max_steps": max_steps,
+                        # Issue #7: freeze the trace ID with the rest of the
+                        # turn so the resumed half logs under the same trace
+                        # (main.resume_agent reads it back with cont.get).
+                        "trace_id": trace_id,
                     }
                     raise
 
@@ -234,5 +251,6 @@ async def _react_steps(gw, messages: list, user_id: str,
                     "content": f"Observation from tool '{tool_name}':\n{observation}"
                 })
 
-    log_event("react_end", {"steps_taken": max_steps, "reply_length": 0, "stopped": "max_steps"})
+    log_event("react_end", {"steps_taken": max_steps, "reply_length": 0, "stopped": "max_steps"},
+              trace_id=trace_id)
     return "Agent stopped: too many reasoning steps."

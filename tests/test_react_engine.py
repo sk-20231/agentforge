@@ -352,3 +352,131 @@ class TestReactErrorHandling:
         with _patch_gateway(gw):
             result = react_loop("u1", "keep going", max_steps=2)
         assert "too many" in result.lower()
+
+
+class TestReactTraceId:
+    """Regression guards for issue #7: run_agent's trace_id must reach every
+    log record the ReAct module emits, the MCP gateway, and the interrupt
+    continuation. Before the fix, react_loop could not even receive a trace
+    ID, so REACT token usage / react_* events / gateway audit entries were
+    orphaned from their turn and per-trace cost reports undercounted REACT."""
+
+    TRACE = "trace-issue7"
+
+    def _stub_final(self, mock_client):
+        final_response = json.dumps({
+            "thought": "done", "action": {"type": "final"}, "reply": "ok",
+        })
+        mock_msg = MagicMock()
+        mock_msg.content = final_response
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=mock_msg)]
+        )
+
+    @patch("agentforge.reasoning.react_engine.log_token_usage")
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_step_token_usage_carries_trace_id(self, mock_client, mock_mem,
+                                               mock_log, mock_usage):
+        """The headline symptom: react_step_N token usage logged untraced."""
+        self._stub_final(mock_client)
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(_FakeGateway()):
+            react_loop("u1", "hello", max_steps=1, trace_id=self.TRACE)
+
+        assert mock_usage.call_count == 1
+        assert mock_usage.call_args.kwargs.get("trace_id") == self.TRACE
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_every_react_log_event_carries_trace_id(self, mock_client, mock_mem,
+                                                    mock_log):
+        """react_start / react_tools_discovered / react_step / react_end must
+        all log under the turn's trace — none may silently drop it."""
+        self._stub_final(mock_client)
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(_FakeGateway()):
+            react_loop("u1", "hello", max_steps=1, trace_id=self.TRACE)
+
+        assert mock_log.call_count >= 4  # start, tools_discovered, step, end
+        untraced = [c for c in mock_log.call_args_list
+                    if c.kwargs.get("trace_id") != self.TRACE]
+        assert untraced == [], f"log_event calls missing the trace_id: {untraced}"
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_gateway_opened_with_trace_id(self, mock_client, mock_mem, mock_log):
+        """The gateway's security audit log (Step 17e gap A) keys on the trace
+        ID it is constructed with — opening it without one orphans every
+        audit entry for the turn."""
+        self._stub_final(mock_client)
+        gw = _FakeGateway()
+        seen = {}
+
+        @contextlib.asynccontextmanager
+        async def _recording_cm(trace_id=None, approval_handler=None):
+            seen["trace_id"] = trace_id
+            yield gw
+
+        from agentforge.reasoning.react_engine import react_loop
+        with patch("agentforge.reasoning.react_engine.mcp_gateway", _recording_cm):
+            react_loop("u1", "hello", max_steps=1, trace_id=self.TRACE)
+
+        assert seen["trace_id"] == self.TRACE
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_interrupt_continuation_freezes_trace_id(self, mock_client, mock_mem,
+                                                     mock_log):
+        """The continuation must carry the trace ID so the resumed half of the
+        turn (main.resume_agent reads cont["trace_id"]) logs under the SAME
+        trace as the first half — one turn, one trace."""
+        from agentforge.approval import ApprovalRequired, ApprovalRequest
+
+        class _GatedGateway(_FakeGateway):
+            async def call(self, tool_name, arguments):
+                raise ApprovalRequired(
+                    ApprovalRequest(tool_name, "ext", arguments))
+
+        tool_step = json.dumps({
+            "thought": "fetch it",
+            "action": {"type": "tool", "tool_name": "fetch",
+                       "tool_input": {"url": "http://example.com"}},
+            "reply": "",
+        })
+        mock_msg = MagicMock()
+        mock_msg.content = tool_step
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=mock_msg)]
+        )
+
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(_GatedGateway()):
+            with pytest.raises(ApprovalRequired) as excinfo:
+                react_loop("u1", "get the page", max_steps=2,
+                           trace_id=self.TRACE)
+
+        assert excinfo.value.continuation["trace_id"] == self.TRACE
+
+    @patch("agentforge.main.classify_intent")
+    @patch("agentforge.main.react_loop")
+    @patch("agentforge.main.Span", MagicMock())
+    @patch("agentforge.main.log_event")
+    def test_run_agent_passes_trace_id_to_react_pipeline(self, mock_log,
+                                                         mock_react,
+                                                         mock_classify):
+        """The actual bug site: run_agent handed trace_id to every pipeline
+        EXCEPT the REACT branch. Guards the main.py wiring directly."""
+        mock_classify.return_value = {
+            "intent": "REACT", "memory_candidate": False, "reason": "test",
+        }
+        mock_react.return_value = "done"
+
+        from agentforge.main import run_agent
+        run_agent("u1", "s1", "plan my trip", trace_id=self.TRACE)
+
+        assert mock_react.call_args.kwargs.get("trace_id") == self.TRACE

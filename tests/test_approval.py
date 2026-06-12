@@ -17,6 +17,9 @@ The invariants under test:
   - resume settles the STORED call exactly once; new gated calls re-interrupt
   - automated guards run FIRST -> a human is never asked about an SSRF-blocked call
   - every request/decision audited; arg NAMES only, never values
+  - APPROVE_TURN (issue #6) grants ONE (server, tool) for the REST OF THE TURN:
+    asked once, later calls skip the gate, the grant rides the continuation
+    across interrupts and dies with the turn (never leaks into a new gateway)
 """
 import asyncio
 import contextlib
@@ -26,6 +29,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agentforge.approval import (
+    APPROVE_TURN,
     ApprovalRequest,
     ApprovalRequired,
     make_resume_handler,
@@ -494,6 +498,180 @@ class TestReactResume:
         assert second.request.arguments == {"url": "http://9.9.9.9/other"}
         assert second.continuation["step"] == 1          # one step further in
         session.call_tool.assert_called_once()           # only the approved call ran
+
+    def test_resume_with_approve_turn_covers_later_calls_to_same_tool(self):
+        """Issue #6 end-to-end: same scenario as the test above, but the human
+        answers "allow for the rest of this turn". The second fetch (different
+        URL!) rides the grant instead of interrupting again — one card for the
+        whole paging loop. The grant travels: continuation -> resumed gateway."""
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        with contextlib.ExitStack() as stack:
+            react_engine, _ = self._react_env(
+                stack, session,
+                [_REACT_TOOL_STEP, _REACT_SECOND_TOOL_STEP, _REACT_FINAL_STEP])
+            interrupt = self._capture_interrupt(react_engine)
+            assert interrupt.continuation["granted"] == set()   # nothing granted yet
+            reply = react_engine.resume_react_loop(interrupt, APPROVE_TURN,
+                                                   approval_handler=_raising_handler)
+
+        assert reply == "Trip planned"                   # turn completed, no 2nd card
+        assert session.call_tool.await_count == 2        # BOTH fetches dispatched
+        # The grant was recorded in the turn's own state (the shared set).
+        assert interrupt.continuation["granted"] == {("ext", "fetch")}
+
+
+# --------------------------- turn-scoped grants (issue #6) ---------------------------
+
+class TestTurnScopedGrant:
+    """APPROVE_TURN allows one (server, tool) for the rest of the turn.
+
+    The gateway interprets the decision: it records the pair in its ``granted``
+    set; later calls to a granted tool dispatch without consulting the handler.
+    The set is shared with the continuation, so the grant survives
+    interrupt→resume — and a NEW turn builds a new gateway with a fresh set,
+    so a grant can never outlive its turn.
+    """
+
+    def _run_calls(self, session, handler, calls, servers=_UNTRUSTED,
+                   granted=None, capture=None):
+        """Open ONE gateway (= one turn segment) and dispatch ``calls`` in order."""
+        async def _go():
+            async with mcp_gateway("tid", approval_handler=handler,
+                                   granted=granted) as gw:
+                return [await gw.call(tool, args) for tool, args in calls]
+
+        with contextlib.ExitStack() as stack:
+            _gateway_patches(stack, session, servers, capture)
+            return asyncio.run(_go())
+
+    def test_approve_turn_asks_once_then_skips_the_gate(self):
+        """The paging case: 5 cards for one article becomes 1. Different args
+        per call — the grant is per-TOOL, unlike the one-shot exact-match."""
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        asked = []
+
+        def handler(request):
+            asked.append(request)
+            return APPROVE_TURN
+
+        results = self._run_calls(session, handler, [
+            ("fetch", {"topic": "page 1"}),
+            ("fetch", {"topic": "page 2"}),
+            ("fetch", {"topic": "page 3"}),
+        ])
+
+        assert len(asked) == 1                       # human asked exactly once
+        assert session.call_tool.await_count == 3    # all three dispatched
+        for r in results:
+            assert "<untrusted_data" in r            # 17e wrap still applies
+
+    def test_allow_once_still_asks_every_time(self):
+        """Plain True keeps the pre-#6 semantics — per-call approval."""
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        asked = []
+
+        def handler(request):
+            asked.append(request)
+            return True
+
+        self._run_calls(session, handler, [
+            ("fetch", {"topic": "page 1"}),
+            ("fetch", {"topic": "page 2"}),
+        ])
+
+        assert len(asked) == 2
+
+    def test_grant_does_not_cross_tools(self):
+        """Granting fetch must not bless a different gated tool."""
+        session = _make_session_mock(
+            [_make_mcp_tool("fetch"), _make_mcp_tool("send_email")],
+            call_text="OK")
+        asked = []
+
+        def handler(request):
+            asked.append(request.tool)
+            return APPROVE_TURN
+
+        self._run_calls(session, handler, [
+            ("fetch", {"topic": "a"}),
+            ("fetch", {"topic": "b"}),       # covered by the fetch grant
+            ("send_email", {"topic": "c"}),  # different tool -> ask again
+        ])
+
+        assert asked == ["fetch", "send_email"]
+
+    def test_grant_dies_with_the_turn(self):
+        """A new gateway (= a new turn) starts with a fresh empty set — the
+        grant can never leak into the next question."""
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        asked = []
+
+        def handler(request):
+            asked.append(request)
+            return APPROVE_TURN
+
+        self._run_calls(session, handler, [("fetch", {"topic": "turn 1"})])
+        self._run_calls(session, handler, [("fetch", {"topic": "turn 2"})])
+
+        assert len(asked) == 2                       # asked once PER TURN
+
+    def test_grant_set_is_shared_with_the_caller(self):
+        """The pipeline passes the continuation's set in; the gateway must
+        mutate THAT object (not a copy) so resume sees the grant."""
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        granted = set()
+
+        self._run_calls(session, lambda r: APPROVE_TURN,
+                        [("fetch", {"topic": "a"})], granted=granted)
+
+        assert granted == {("ext", "fetch")}
+
+    def test_resumed_gateway_honors_a_prior_grant(self):
+        """A grant made before the interrupt covers calls after the resume:
+        the resumed gateway receives the stored set and never asks."""
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+
+        def handler(request):  # pragma: no cover - must never run
+            raise AssertionError("handler consulted despite an existing grant")
+
+        results = self._run_calls(session, handler, [("fetch", {"topic": "a"})],
+                                  granted={("ext", "fetch")})
+
+        assert session.call_tool.await_count == 1
+        assert "<untrusted_data" in results[0]
+
+    def test_audit_distinguishes_grant_scopes(self):
+        """The trail must show which calls a human looked at (turn_grant_created)
+        versus which rode an earlier grant (turn_grant_used) — issue #6."""
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        capture = []
+
+        self._run_calls(session, lambda r: APPROVE_TURN, [
+            ("fetch", {"topic": "a"}),
+            ("fetch", {"topic": "b"}),
+        ], capture=capture)
+
+        scopes = [p.get("scope") for e, p, kw in capture
+                  if e == "mcp_audit" and p.get("outcome") == "approved"]
+        assert scopes == ["turn_grant_created", "turn_grant_used"]
+
+    def test_once_approval_audited_as_once(self):
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        capture = []
+
+        self._run_calls(session, lambda r: True, [("fetch", {"topic": "a"})],
+                        capture=capture)
+
+        scopes = [p.get("scope") for e, p, kw in capture
+                  if e == "mcp_audit" and p.get("outcome") == "approved"]
+        assert scopes == ["once"]
+
+    def test_make_resume_handler_transports_approve_turn(self):
+        """The one-shot handler only carries the decision; APPROVE_TURN must
+        arrive at the gateway unchanged."""
+        pending = ApprovalRequest("fetch", "ext", {"url": "http://x.com"})
+        handler = make_resume_handler(APPROVE_TURN, pending)
+        assert handler(ApprovalRequest("fetch", "ext", {"url": "http://x.com"})) == APPROVE_TURN
 
 
 # --------------------------- ACT interrupt -> resume ---------------------------

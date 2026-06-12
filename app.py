@@ -9,7 +9,7 @@ import os
 
 import streamlit as st
 
-from agentforge.approval import ApprovalRequest, ApprovalRequired
+from agentforge.approval import APPROVE_TURN, ApprovalRequest, ApprovalRequired
 from agentforge.main import resume_agent, run_agent
 from agentforge.rag.document_store import ingest_file, load_corpus
 from agentforge.logger import compute_cost_summary, compute_trace_cost, generate_trace_id
@@ -140,14 +140,22 @@ if st.session_state.pending_approval is not None and st.session_state.resume_dec
             ),
             language="json",
         )
-        allow_col, deny_col = st.columns(2)
-        # Either click records the decision and reruns — the processing block
+        allow_col, turn_col, deny_col = st.columns(3)
+        # Any click records the decision and reruns — the processing block
         # below then RESUMES the interrupted turn, settling this exact stored
         # call with the decision. Deny also resumes: the model receives a
         # readable "user declined" observation and can adapt (same semantics as
         # the CLI's 'n'), instead of the turn silently dying.
-        if allow_col.button("✅ Allow", use_container_width=True):
+        # "Allow for this turn" (issue #6) approves this call AND every later
+        # call to the SAME tool until the turn finishes — the answer to one
+        # paging fetch raising five cards. The grant rides in the turn's own
+        # state (the continuation), so it expires with the turn automatically;
+        # the next question starts gated again.
+        if allow_col.button("✅ Allow once", use_container_width=True):
             st.session_state.resume_decision = True
+            st.rerun()
+        if turn_col.button("🔁 Allow for this turn", use_container_width=True):
+            st.session_state.resume_decision = APPROVE_TURN
             st.rerun()
         if deny_col.button("🚫 Deny", use_container_width=True):
             st.session_state.resume_decision = False

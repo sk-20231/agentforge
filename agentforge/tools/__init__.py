@@ -222,6 +222,10 @@ async def _dispatch_and_followup(gw, messages: list, tool_calls, tool_messages: 
                 "tool_messages": list(tool_messages),
                 "pending_index": i,
                 "trace_id": trace_id,
+                # Issue #6: the turn's approval-grant set rides in the
+                # continuation so "allow for the rest of this turn" survives
+                # interrupt→resume and dies with the turn.
+                "granted": gw.granted,
             }
             raise
         tool_messages.append({
@@ -259,7 +263,7 @@ async def _dispatch_and_followup(gw, messages: list, tool_calls, tool_messages: 
         })
 
 
-async def _resume_tool_loop_async(interrupt: ApprovalRequired, decision: bool,
+async def _resume_tool_loop_async(interrupt: ApprovalRequired, decision,
                                   fallback=None) -> str:
     """Re-enter an interrupted ACT turn mid-flight (Step 17f resume).
 
@@ -276,7 +280,8 @@ async def _resume_tool_loop_async(interrupt: ApprovalRequired, decision: bool,
         "decision": "approved" if decision else "denied",
     }, trace_id=cont["trace_id"])
 
-    async with mcp_gateway(cont["trace_id"], approval_handler=handler) as gw:
+    async with mcp_gateway(cont["trace_id"], approval_handler=handler,
+                           granted=cont.get("granted")) as gw:
         return await _dispatch_and_followup(
             gw, cont["messages"], cont["tool_calls"], cont["tool_messages"],
             cont["pending_index"], cont["trace_id"], cont["user_id"])
@@ -293,13 +298,14 @@ def run_llm_with_tools(user_id: str, user_input: str, trace_id: str = None,
                                             user_id=user_id))
 
 
-def resume_tool_loop(interrupt: ApprovalRequired, decision: bool,
+def resume_tool_loop(interrupt: ApprovalRequired, decision,
                      approval_handler=None) -> str:
     """Resume an ACT turn that was interrupted for human approval (Step 17f).
 
     ``interrupt`` is the ApprovalRequired the front-end caught — its
     ``continuation`` holds the frozen loop state. ``decision`` is the human's
-    Allow (True) / Deny (False) for the stored pending call. Resume — not
+    Deny (False) / Allow once (True) / APPROVE_TURN (allow this tool for the
+    rest of the turn — issue #6) for the stored pending call. Resume — not
     replay — so the decision settles the EXACT call the human looked at; the
     LLM is never asked to regenerate it. Returns the same JSON-string contract
     as ``run_llm_with_tools`` (main.resume_agent parses it).

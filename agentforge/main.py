@@ -72,9 +72,10 @@ def stream_llm_answer(user_input: str, trace_id: str = None) -> Iterator[str]:
 
 
 def run_react_agent(user_id: str, user_input: str, max_steps: int = 5,
-                    approval_handler=None) -> str:
+                    approval_handler=None, trace_id: str = None) -> str:
     """Delegates to the memory-aware ReAct loop."""
-    return react_loop(user_id, user_input, max_steps, approval_handler=approval_handler)
+    return react_loop(user_id, user_input, max_steps,
+                      approval_handler=approval_handler, trace_id=trace_id)
 
 VALID_INTENTS = frozenset({"REMEMBER", "ACT", "REACT", "ANSWER", "IGNORE", "RESPOND_WITH_MEMORY", "DOCS_QA"})
 
@@ -174,8 +175,12 @@ def run_agent(
     # -------------------------------
     if intent == "REACT":
         with Span("react_pipeline", trace_id=tid) as span:
+            # Issue #7: REACT was the only pipeline run_agent didn't hand the
+            # trace ID to, so its token/step/audit logs were orphaned from the
+            # turn and per-trace cost reports undercounted REACT turns.
             result = run_react_agent(user_id, user_input,
-                                     approval_handler=approval_handler)
+                                     approval_handler=approval_handler,
+                                     trace_id=tid)
             span.payload = {"reply_length": len(result)}
         log_event("trace_end", {"intent": intent}, trace_id=tid)
         return result

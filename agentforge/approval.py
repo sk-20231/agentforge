@@ -85,16 +85,37 @@ class ApprovalRequired(Exception):
         )
 
 
-# The contract front-ends implement: ApprovalRequest in → decision out (or raise).
-ApprovalHandler = Callable[[ApprovalRequest], bool]
+# A handler's decision is tri-state (issue #6):
+#   False        → deny this call
+#   True         → allow exactly this call (one-shot)
+#   APPROVE_TURN → allow this call AND every later call to the SAME tool for
+#                  the REST OF THIS TURN. The standard answer to approval
+#                  fatigue (a paging fetch raised 5 cards for one article):
+#                  asking five times trains the human to rubber-stamp, which
+#                  is worse than asking once. Deliberately narrower than a
+#                  persistent "always allow" — the grant lives in the turn's
+#                  own state (the gateway's ``granted`` set, carried by the
+#                  continuation across interrupts), so it expires WITH the
+#                  turn by construction. There is no cleanup step to forget:
+#                  scope binds to the stored turn, not to ambient session
+#                  state — same artifact-binding principle as resume itself.
+# A truthy string keeps backward compatibility: any consumer that only checks
+# ``if decision`` treats it as a plain approve-once.
+APPROVE_TURN = "approve_turn"
+
+# The contract front-ends implement: ApprovalRequest in → decision out (or
+# raise). The decision is False / True / APPROVE_TURN (see above).
+ApprovalHandler = Callable[[ApprovalRequest], Any]
 
 
-def make_resume_handler(decision: bool, pending: ApprovalRequest,
+def make_resume_handler(decision, pending: ApprovalRequest,
                         fallback: Optional[ApprovalHandler] = None) -> ApprovalHandler:
     """Build the approval handler for a resumed turn: a one-shot grant.
 
-    The human's Allow/Deny applies to **exactly the stored pending call** —
-    same tool, same server, same arguments — and is consumed on first use.
+    The human's decision (False / True / APPROVE_TURN) applies to **exactly
+    the stored pending call** — same tool, same server, same arguments — and
+    is consumed on first use. The handler only *transports* the decision; the
+    gateway is what interprets APPROVE_TURN and records the turn-scoped grant.
     Anything else the resumed loop tries goes to ``fallback`` (the front-end's
     normal handler, so a NEW gated call triggers a fresh interrupt/card), or is
     denied when there is no fallback. This keeps the security property intact:

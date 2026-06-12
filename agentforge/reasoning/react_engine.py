@@ -45,13 +45,14 @@ def react_loop(user_id: str, user_input: str, max_steps: int = 5,
                                                trace_id=trace_id))
 
 
-def resume_react_loop(interrupt: ApprovalRequired, decision: bool,
+def resume_react_loop(interrupt: ApprovalRequired, decision,
                       approval_handler=None) -> str:
     """Resume a ReAct turn that was interrupted for human approval (Step 17f).
 
     ``interrupt`` is the ApprovalRequired the front-end caught — its
     ``continuation`` holds the frozen loop state. ``decision`` is the human's
-    Allow (True) / Deny (False) for the stored pending call. Resume — not
+    Deny (False) / Allow once (True) / APPROVE_TURN (allow this tool for the
+    rest of the turn — issue #6) for the stored pending call. Resume — not
     replay — so the decision settles the EXACT call the human looked at; the
     LLM is never asked to regenerate it (it wouldn't reproduce the same
     arguments — LLM output is non-deterministic). A Deny resumes too: the model
@@ -97,7 +98,7 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5,
                                   trace_id=trace_id)
 
 
-async def _react_resume_async(interrupt: ApprovalRequired, decision: bool,
+async def _react_resume_async(interrupt: ApprovalRequired, decision,
                               fallback=None) -> str:
     """Re-enter an interrupted ReAct turn mid-flight (Step 17f resume).
 
@@ -117,7 +118,8 @@ async def _react_resume_async(interrupt: ApprovalRequired, decision: bool,
         "decision": "approved" if decision else "denied",
     }, trace_id=trace_id)
 
-    async with mcp_gateway(trace_id, approval_handler=handler) as gw:
+    async with mcp_gateway(trace_id, approval_handler=handler,
+                           granted=cont.get("granted")) as gw:
         # Finish the interrupted step: dispatch (or deny) the stored call.
         # The one-shot handler answers it without raising; gw.call's normal
         # contract applies (wrap on success, declined-string on deny).
@@ -225,6 +227,11 @@ async def _react_steps(gw, messages: list, user_id: str,
                         # turn so the resumed half logs under the same trace
                         # (main.resume_agent reads it back with cont.get).
                         "trace_id": trace_id,
+                        # Issue #6: the turn's approval-grant set rides in the
+                        # continuation — resume hands it to the next gateway,
+                        # so "allow for the rest of this turn" survives every
+                        # interrupt and dies with the turn (no cleanup code).
+                        "granted": gw.granted,
                     }
                     raise
 

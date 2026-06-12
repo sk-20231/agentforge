@@ -14,21 +14,24 @@ Streaming behaviour (Step 4):
 """
 import json
 
-from agentforge.approval import ApprovalRequest
+from agentforge.approval import APPROVE_TURN, ApprovalRequest
 from agentforge.main import run_agent
 from agentforge.logger import log_event
 from agentforge.tools import prime_tool_catalog
 
 
-def cli_approval_handler(request: ApprovalRequest) -> bool:
-    """Human-in-the-loop gate for the CLI (Step 17f).
+def cli_approval_handler(request: ApprovalRequest):
+    """Human-in-the-loop gate for the CLI (Step 17f; turn grants — issue #6).
 
     The terminal CAN block mid-turn, so this is the simple half of the approval
-    contract: print what the agent wants to do, read y/n, return the decision.
+    contract: print what the agent wants to do, read the answer, return the
+    decision: y = allow once, t = allow this tool for the rest of this turn
+    (the fix for approval fatigue when e.g. a fetch pages one article in
+    chunks), anything else = deny.
     The arguments are shown in full — the human can only make an informed
     decision if they can see exactly what would be sent (e.g. the URL a fetch
     would request). Shown on screen only; the audit log records arg names, never
-    values. Default is DENY: anything but an explicit yes declines the call.
+    values. Default is DENY: anything but an explicit y/t declines the call.
 
     (Known limit, documented in mcp_client: input() blocks the event loop —
     fine for a single-user CLI, revisit for the multi-user product.)
@@ -37,7 +40,9 @@ def cli_approval_handler(request: ApprovalRequest) -> bool:
     print(f"    tool:      {request.tool}")
     print(f"    server:    {request.server}  (requires approval)")
     print(f"    arguments: {json.dumps(request.arguments, ensure_ascii=False)}")
-    answer = input("    Allow this call? [y/N] ").strip().lower()
+    answer = input("    Allow this call? [y = once / t = rest of this turn / N] ").strip().lower()
+    if answer in ("t", "turn"):
+        return APPROVE_TURN
     return answer in ("y", "yes")
 
 

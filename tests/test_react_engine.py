@@ -25,6 +25,7 @@ class _FakeGateway:
         self.catalog = catalog or []
         self._call_result = call_result
         self.calls = []  # records (tool_name, tool_input) for assertions
+        self.granted = set()  # turn-scoped approval grants (issue #6)
 
     @property
     def has_tools(self):

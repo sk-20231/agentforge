@@ -49,7 +49,7 @@ from mcp.client.stdio import (
     stdio_client,
 )
 
-from agentforge.approval import ApprovalHandler, ApprovalRequest
+from agentforge.approval import APPROVE_TURN, ApprovalHandler, ApprovalRequest
 from agentforge.config import MCP_SERVERS, AGENT_TOOL_PINS_FILE
 from agentforge.logger import log_event
 from agentforge.safety import (
@@ -121,12 +121,21 @@ class MCPGateway:
     """
 
     def __init__(self, trace_id: Optional[str] = None,
-                 approval_handler: Optional[ApprovalHandler] = None):
+                 approval_handler: Optional[ApprovalHandler] = None,
+                 granted: Optional[set] = None):
         self.trace_id = trace_id
         # Front-end-supplied human-in-the-loop callback (Step 17f). None means
         # "no way to ask a human" — gated calls are then DENIED by default;
         # nothing silently auto-approves.
         self.approval_handler = approval_handler
+        # Turn-scoped approval grants (issue #6): (server, tool) pairs the human
+        # allowed "for the rest of this turn". The SAME set object is shared
+        # with the pipeline's continuation, so grants survive interrupt→resume
+        # (each resume passes the set back in) and die with the turn — a new
+        # turn builds a new gateway with a fresh empty set, so a grant can
+        # never leak across turns. Keyed by server AND tool: a grant for one
+        # tool must not bless a same-named tool from another server.
+        self.granted: set = granted if granted is not None else set()
         # One unguessable nonce per turn. Every untrusted-data wrap this gateway
         # emits uses it, so attacker-controlled tool output can't forge the
         # closing delimiter (Step 17e spotlighting).
@@ -341,22 +350,42 @@ class MCPGateway:
         # turn so a front-end that can't block (Streamlit) can ask via its own
         # UI and replay; it must not be caught here.
         if self._requires_approval.get(tool_name, False):
-            request = ApprovalRequest(tool=tool_name, server=server,
-                                      arguments=arguments or {})
-            self._audit(tool_name, server, trusted, arg_keys, "approval_requested")
-            if self.approval_handler is None:
-                # No way to ask a human -> deny by default. A readable string,
-                # not an exception, so the model can observe and adapt.
-                self._audit(tool_name, server, trusted, arg_keys, "denied",
-                            reason="no approval handler configured")
-                return (f"Error: tool '{tool_name}' requires human approval and no "
-                        f"approval handler is configured — the call was not made.")
-            if not self.approval_handler(request):
-                self._audit(tool_name, server, trusted, arg_keys, "denied",
-                            reason="user declined")
-                return (f"Error: the user declined permission for tool "
-                        f"'{tool_name}' — the call was not made.")
-            self._audit(tool_name, server, trusted, arg_keys, "approved")
+            # Turn-scoped grant check first (issue #6): if the human already
+            # said "allow this tool for the rest of this turn", don't ask
+            # again — repeated cards for one paging loop train the user to
+            # rubber-stamp. Audited distinctly so the trail shows which calls
+            # a human looked at versus which rode an earlier grant.
+            if (server, tool_name) in self.granted:
+                self._audit(tool_name, server, trusted, arg_keys, "approved",
+                            scope="turn_grant_used")
+            else:
+                request = ApprovalRequest(tool=tool_name, server=server,
+                                          arguments=arguments or {})
+                self._audit(tool_name, server, trusted, arg_keys, "approval_requested")
+                if self.approval_handler is None:
+                    # No way to ask a human -> deny by default. A readable string,
+                    # not an exception, so the model can observe and adapt.
+                    self._audit(tool_name, server, trusted, arg_keys, "denied",
+                                reason="no approval handler configured")
+                    return (f"Error: tool '{tool_name}' requires human approval and no "
+                            f"approval handler is configured — the call was not made.")
+                decision = self.approval_handler(request)
+                if not decision:
+                    self._audit(tool_name, server, trusted, arg_keys, "denied",
+                                reason="user declined")
+                    return (f"Error: the user declined permission for tool "
+                            f"'{tool_name}' — the call was not made.")
+                if decision == APPROVE_TURN:
+                    # The gateway, not the handler, owns grant semantics: record
+                    # the (server, tool) pair so later calls this turn skip the
+                    # ask. The set is shared with the continuation, so the
+                    # grant survives interrupt→resume and dies with the turn.
+                    self.granted.add((server, tool_name))
+                    self._audit(tool_name, server, trusted, arg_keys, "approved",
+                                scope="turn_grant_created")
+                else:
+                    self._audit(tool_name, server, trusted, arg_keys, "approved",
+                                scope="once")
 
         start = time.perf_counter()
         try:
@@ -410,7 +439,8 @@ class MCPGateway:
 
 @contextlib.asynccontextmanager
 async def mcp_gateway(trace_id: Optional[str] = None,
-                      approval_handler: Optional[ApprovalHandler] = None):
+                      approval_handler: Optional[ApprovalHandler] = None,
+                      granted: Optional[set] = None):
     """Open an :class:`MCPGateway` for one agent turn, then tear it down.
 
     Usage::
@@ -426,8 +456,11 @@ async def mcp_gateway(trace_id: Optional[str] = None,
 
     ``approval_handler`` is the front-end's human-in-the-loop callback (Step
     17f); see ``agentforge.approval``. Omitted → gated tools are denied.
+    ``granted`` is the turn's approval-grant set (issue #6) — resume paths pass
+    the set stored in the continuation so "allow for the rest of this turn"
+    survives the interrupt; omitted (every fresh turn) → a new empty set.
     """
-    gw = MCPGateway(trace_id, approval_handler=approval_handler)
+    gw = MCPGateway(trace_id, approval_handler=approval_handler, granted=granted)
     async with contextlib.AsyncExitStack() as stack:
         await gw._discover(stack)
         yield gw

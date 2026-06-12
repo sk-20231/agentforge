@@ -206,15 +206,18 @@ def run_agent(
     return "Okay 🙂"
 
 
-def resume_agent(interrupt, decision: bool, approval_handler=None) -> str:
+def resume_agent(interrupt, decision, approval_handler=None) -> str:
     """Resume a turn that was interrupted for human approval (Step 17f).
 
     ``interrupt`` is the ApprovalRequired the front-end caught from run_agent;
     its ``continuation`` (attached by the pipeline loop as the exception
     unwound) tells us which pipeline to re-enter and carries its frozen state.
-    ``decision`` is the human's Allow/Deny for ``interrupt.request``. The
-    decision settles ONLY that stored call (one-shot); any new gated call the
-    resumed turn makes goes back through ``approval_handler`` and can interrupt
+    ``decision`` is the human's choice for ``interrupt.request``: False (deny),
+    True (allow once), or ``approval.APPROVE_TURN`` (allow + grant the same
+    tool for the rest of this turn — issue #6; the gateway records the grant
+    in the turn's ``granted`` set, carried by the continuation). The decision
+    settles ONLY that stored call (one-shot); any new gated call the resumed
+    turn makes goes back through ``approval_handler`` and can interrupt
     again — each interrupt gets its own decision.
 
     No intent re-classification happens here — the original classification is

@@ -9,10 +9,22 @@ from agentforge.approval import (
     make_resume_handler,
     run_interruptible,
 )
-from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
-from agentforge.prompts import build_prompt, render_tool_catalog, OUTPUT_SCHEMA
+from agentforge.config import (
+    OPENAI_MODEL,
+    OPENAI_BASE_URL,
+    REACT_OBS_COMPRESS_THRESHOLD,
+)
+from agentforge.prompts import (
+    build_prompt,
+    render_tool_catalog,
+    OBSERVATION_COMPRESSION_PROMPT,
+    OUTPUT_SCHEMA,
+    REACT_TOOL_EFFICIENCY,
+    SPOTLIGHT_INSTRUCTIONS,
+)
 from agentforge.mcp_client import mcp_gateway
 from agentforge.memory.semantic import get_relevant_memories, store_memory
+from agentforge.safety import wrap_untrusted
 from agentforge.logger import log_event, log_token_usage
 
 _client = None  # created on first API call, not at import time
@@ -90,6 +102,7 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5,
         # only reference tools that are actually served this turn.
         messages = build_prompt(user_input, memory_chunks)
         messages.append({"role": "system", "content": render_tool_catalog(gw.catalog)})
+        messages.append({"role": "system", "content": REACT_TOOL_EFFICIENCY})
         messages.append({"role": "system", "content": OUTPUT_SCHEMA})
         log_event("react_tools_discovered", {"tools": [t["name"] for t in gw.catalog]},
                   trace_id=trace_id)
@@ -131,6 +144,10 @@ async def _react_resume_async(interrupt: ApprovalRequired, decision,
 
         messages = cont["messages"]
         messages.append({"role": "assistant", "content": cont["raw"]})
+        # Same compression as the in-loop path (issue #8): the approved call's
+        # observation is as oversized as any other fetch chunk.
+        observation = _maybe_compress_observation(
+            observation, messages, gw, trace_id=trace_id)
         messages.append({
             "role": "user",
             "content": f"Observation from tool '{cont['tool_name']}':\n{observation}"
@@ -138,6 +155,74 @@ async def _react_resume_async(interrupt: ApprovalRequired, decision,
         return await _react_steps(gw, messages, cont["user_id"],
                                   cont["step"] + 1, cont["max_steps"],
                                   trace_id=trace_id)
+
+
+def _user_question(messages: list) -> str:
+    """The original user question in a ReAct message list.
+
+    Observations are also appended as ``user`` messages (issue #1), so the
+    question is the first user message that is NOT a tool observation. Works
+    on fresh and resumed (frozen) message lists alike — no extra state to
+    thread through the continuation.
+    """
+    for m in messages:
+        if m.get("role") == "user" and not str(m.get("content", "")).startswith(
+                "Observation from tool"):
+            return m["content"]
+    return ""
+
+
+def _maybe_compress_observation(observation: str, messages: list, gw,
+                                trace_id: str = None) -> str:
+    """Query-focused compression of an oversized observation (issue #8).
+
+    Every observation appended to ``messages`` is re-sent on EVERY later step,
+    so a raw 3-8k-char fetch chunk inflates the cost of each remaining step and
+    buries the relevant facts mid-context. One extra LLM call here reads the
+    chunk ONCE, extracts only what answers the user's question, and the loop
+    carries that instead. Below the threshold the observation passes through
+    untouched (zero added cost on the common path).
+
+    Security: the chunk is untrusted data, and a hostile page that cannot
+    inject the agent must not get to inject the summarizer instead — so the
+    compressor receives the same SPOTLIGHT_INSTRUCTIONS, and its output (a
+    derivative of untrusted text) is RE-WRAPPED with the turn's nonce before
+    it enters the history. Compression failure falls back to the raw
+    observation: a logging-adjacent optimization must never kill the turn.
+    """
+    if REACT_OBS_COMPRESS_THRESHOLD <= 0:
+        return observation
+    if len(observation) <= REACT_OBS_COMPRESS_THRESHOLD:
+        return observation
+
+    question = _user_question(messages)
+    try:
+        response = _get_client().chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": SPOTLIGHT_INSTRUCTIONS},
+                {"role": "system",
+                 "content": OBSERVATION_COMPRESSION_PROMPT.format(question=question)},
+                {"role": "user", "content": observation},
+            ],
+        )
+        log_token_usage(response, "react_obs_compress", trace_id=trace_id)
+        summary = (response.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.warning("react: observation compression failed, keeping raw "
+                       "observation: %s", e)
+        log_event("react_obs_compress_failed", {"error": str(e)},
+                  trace_id=trace_id)
+        return observation
+
+    if not summary:
+        return observation
+    log_event("react_obs_compressed", {
+        "original_len": len(observation),
+        "summary_len": len(summary),
+    }, trace_id=trace_id)
+    return wrap_untrusted(summary, source="compressed tool output",
+                          nonce=gw.nonce)
 
 
 async def _react_steps(gw, messages: list, user_id: str,
@@ -253,6 +338,11 @@ async def _react_steps(gw, messages: list, user_id: str,
                     "content": raw
                 })
 
+                # Oversized observations are compressed relative to the user's
+                # question before entering the history (issue #8) — otherwise
+                # every later step re-sends the raw chunk.
+                observation = _maybe_compress_observation(
+                    observation, messages, gw, trace_id=trace_id)
                 messages.append({
                     "role": "user",
                     "content": f"Observation from tool '{tool_name}':\n{observation}"

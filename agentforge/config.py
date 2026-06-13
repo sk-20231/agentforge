@@ -33,6 +33,13 @@ AGENT_TOOL_PINS_FILE = os.environ.get("AGENT_TOOL_PINS_FILE", "tool_pins.json")
 # consume 1,000–2,000 tokens on DOCS_QA calls) within most model context windows.
 HISTORY_TOKEN_BUDGET = int(os.environ.get("HISTORY_TOKEN_BUDGET", "2000"))
 
+# ReAct observation compression threshold, in characters (issue #8). A tool
+# observation longer than this is compressed by one query-focused LLM call
+# before it enters the loop's message history — otherwise every later step
+# re-sends the raw chunk (cost grows per step, attention degrades). Small
+# observations pass through untouched; 0 disables compression entirely.
+REACT_OBS_COMPRESS_THRESHOLD = int(os.environ.get("REACT_OBS_COMPRESS_THRESHOLD", "2500"))
+
 # MCP servers the agent connects to at runtime to discover and call tools.
 #
 # Follows the cross-vendor standard "mcpServers" shape (Claude Desktop / Cursor /

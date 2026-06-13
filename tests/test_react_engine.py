@@ -26,6 +26,7 @@ class _FakeGateway:
         self._call_result = call_result
         self.calls = []  # records (tool_name, tool_input) for assertions
         self.granted = set()  # turn-scoped approval grants (issue #6)
+        self.nonce = "testnonce"  # per-turn spotlight nonce (issue #8 re-wrap)
 
     @property
     def has_tools(self):
@@ -353,6 +354,143 @@ class TestReactErrorHandling:
         with _patch_gateway(gw):
             result = react_loop("u1", "keep going", max_steps=2)
         assert "too many" in result.lower()
+
+
+class TestObservationCompression:
+    """Issue #8: oversized observations are compressed (query-focused) before
+    entering the message history; small ones pass through with zero added cost.
+    The compressor is spotlighted and its output is re-wrapped with the turn's
+    nonce; a compression failure falls back to the raw observation."""
+
+    _TOOL_STEP = json.dumps({
+        "thought": "look it up",
+        "action": {"type": "tool", "tool_name": "search_wikipedia",
+                   "tool_input": {"topic": "Ada Lovelace"}},
+        "reply": "",
+    })
+    _FINAL_STEP = json.dumps({
+        "thought": "done", "action": {"type": "final"}, "reply": "answered",
+    })
+
+    def _llm(self, content):
+        msg = MagicMock()
+        msg.content = content
+        return MagicMock(choices=[MagicMock(message=msg)])
+
+    def _catalog(self):
+        return [{"name": "search_wikipedia", "description": "Look up a topic",
+                 "input_schema": {"properties": {"topic": {"type": "string"}}}}]
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_small_observation_passes_through_uncompressed(self, mock_client,
+                                                           mock_mem, mock_log):
+        """Below the threshold: no extra LLM call, raw observation kept."""
+        mock_client.chat.completions.create.side_effect = [
+            self._llm(self._TOOL_STEP), self._llm(self._FINAL_STEP),
+        ]
+        gw = _FakeGateway(catalog=self._catalog(), call_result="short obs")
+
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(gw):
+            react_loop("u1", "who is Ada Lovelace", max_steps=3)
+
+        assert mock_client.chat.completions.create.call_count == 2  # no compress call
+        final_messages = mock_client.chat.completions.create.call_args_list[1].kwargs["messages"]
+        obs = next(m["content"] for m in final_messages
+                   if m["role"] == "user" and "Observation from tool" in m["content"])
+        assert "short obs" in obs
+
+    @patch("agentforge.reasoning.react_engine.log_token_usage")
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_large_observation_is_compressed_and_rewrapped(self, mock_client,
+                                                           mock_mem, mock_log,
+                                                           mock_usage):
+        """Above the threshold: one query-focused compress call; the history
+        carries the re-wrapped summary, never the raw chunk."""
+        big_chunk = "RAW_PAGE_TEXT " * 300  # ~4200 chars > threshold (2500)
+        mock_client.chat.completions.create.side_effect = [
+            self._llm(self._TOOL_STEP),
+            self._llm("- Ada Lovelace wrote the first algorithm"),  # compressor
+            self._llm(self._FINAL_STEP),
+        ]
+        gw = _FakeGateway(catalog=self._catalog(), call_result=big_chunk)
+
+        from agentforge.prompts import OBSERVATION_COMPRESSION_PROMPT, SPOTLIGHT_INSTRUCTIONS
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(gw):
+            react_loop("u1", "who is Ada Lovelace", max_steps=3,
+                       trace_id="t-compress")
+
+        assert mock_client.chat.completions.create.call_count == 3
+
+        # The compress call (2nd): spotlighted, query-focused, fed the raw chunk.
+        compress_messages = mock_client.chat.completions.create.call_args_list[1].kwargs["messages"]
+        sys_contents = [m["content"] for m in compress_messages if m["role"] == "system"]
+        assert SPOTLIGHT_INSTRUCTIONS in sys_contents
+        assert OBSERVATION_COMPRESSION_PROMPT.format(
+            question="who is Ada Lovelace") in sys_contents
+        assert any(m["role"] == "user" and big_chunk in m["content"]
+                   for m in compress_messages)
+
+        # The loop's next step (3rd call) carries the re-wrapped summary only.
+        final_messages = mock_client.chat.completions.create.call_args_list[2].kwargs["messages"]
+        obs = next(m["content"] for m in final_messages
+                   if m["role"] == "user" and "Observation from tool" in m["content"])
+        assert "untrusted_data_testnonce" in obs       # re-wrapped, turn's nonce
+        assert "first algorithm" in obs                # the summary
+        assert "RAW_PAGE_TEXT" not in obs              # raw chunk gone
+
+        # The compress call is cost-tracked under the turn's trace (issue #7).
+        ops = [(c.args[1] if len(c.args) > 1 else c.kwargs.get("operation"),
+                c.kwargs.get("trace_id")) for c in mock_usage.call_args_list]
+        assert ("react_obs_compress", "t-compress") in ops
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_compression_failure_falls_back_to_raw(self, mock_client, mock_mem,
+                                                   mock_log):
+        """The optimization must never kill the turn: compressor error ->
+        the raw observation is used and the loop continues to the answer."""
+        big_chunk = "RAW_PAGE_TEXT " * 300
+        mock_client.chat.completions.create.side_effect = [
+            self._llm(self._TOOL_STEP),
+            Exception("compressor down"),
+            self._llm(self._FINAL_STEP),
+        ]
+        gw = _FakeGateway(catalog=self._catalog(), call_result=big_chunk)
+
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(gw):
+            result = react_loop("u1", "who is Ada Lovelace", max_steps=3)
+
+        assert result == "answered"
+        final_messages = mock_client.chat.completions.create.call_args_list[2].kwargs["messages"]
+        obs = next(m["content"] for m in final_messages
+                   if m["role"] == "user" and "Observation from tool" in m["content"])
+        assert "RAW_PAGE_TEXT" in obs                  # raw kept on failure
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_tool_efficiency_rules_are_in_the_prompt(self, mock_client, mock_mem,
+                                                     mock_log):
+        """The other half of issue #8: the model is steered to fetch big
+        chunks and stop early — fewer steps spent paging."""
+        from agentforge.prompts import REACT_TOOL_EFFICIENCY
+        mock_client.chat.completions.create.return_value = self._llm(self._FINAL_STEP)
+
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(_FakeGateway()):
+            react_loop("u1", "hello", max_steps=1)
+
+        messages = mock_client.chat.completions.create.call_args.kwargs["messages"]
+        sys_contents = [m["content"] for m in messages if m["role"] == "system"]
+        assert REACT_TOOL_EFFICIENCY in sys_contents
 
 
 class TestReactTraceId:

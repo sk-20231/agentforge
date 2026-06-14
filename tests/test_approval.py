@@ -297,8 +297,13 @@ class TestApprovalAudit:
     def test_approval_is_audited_then_call_proceeds(self):
         session = _make_session_mock([_make_mcp_tool("fetch")], call_text="ok")
         events = []
-        _call_through_gateway(session, _UNTRUSTED, "fetch", {"topic": "x"},
-                              handler=MagicMock(return_value=True), capture=events)
+        # Disable the gap-E content guardrail so this asserts the pure APPROVAL
+        # audit sequence. Otherwise an untrusted call also emits a
+        # guardrail_unavailable line (fail-open) when the classifier model isn't
+        # installed, which is the guardrail suite's concern, not this one.
+        with patch("agentforge.mcp_client.AGENT_GUARDRAIL_ENABLED", False):
+            _call_through_gateway(session, _UNTRUSTED, "fetch", {"topic": "x"},
+                                  handler=MagicMock(return_value=True), capture=events)
         outcomes = [a["outcome"] for a in self._audits(events)]
         assert outcomes == ["approval_requested", "approved", "ok"]
 

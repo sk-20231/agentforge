@@ -23,6 +23,21 @@ def _stub_mcp_catalog(monkeypatch):
     ])
 
 
+@pytest.fixture(autouse=True)
+def _guardrail_off_by_default(monkeypatch):
+    """Keep the gap-E content guardrail OUT of unrelated tests (hermeticity).
+
+    The guardrail runs inside ``gw.call()`` on untrusted tool output. With the
+    ungated default model installed, ANY test that dispatches an untrusted call
+    would otherwise download + run the real injection classifier — slow, non-
+    deterministic, and it can change a sibling test's result (e.g. an injection-
+    shaped spotlight payload gets blocked). So we disable the guardrail by default;
+    the tests that actually target it (tests/test_guardrail.py) re-enable it, and
+    the live contract test calls the engine directly (not via the gateway flag).
+    """
+    monkeypatch.setattr("agentforge.mcp_client.AGENT_GUARDRAIL_ENABLED", False)
+
+
 @pytest.fixture
 def temp_memory_dir(tmp_path, monkeypatch):
     """Use a temporary directory for MEMORY_DIR so tests don't modify real memory files."""

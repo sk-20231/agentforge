@@ -49,8 +49,15 @@ from mcp.client.stdio import (
     stdio_client,
 )
 
+from agentforge import guardrail
 from agentforge.approval import APPROVE_TURN, ApprovalHandler, ApprovalRequest
-from agentforge.config import MCP_SERVERS, AGENT_TOOL_PINS_FILE
+from agentforge.config import (
+    AGENT_GUARDRAIL_ENABLED,
+    AGENT_GUARDRAIL_FAIL_CLOSED,
+    AGENT_GUARDRAIL_SCAN_TRUSTED,
+    AGENT_TOOL_PINS_FILE,
+    MCP_SERVERS,
+)
 from agentforge.logger import log_event
 from agentforge.safety import (
     fingerprint_tool,
@@ -402,6 +409,15 @@ class MCPGateway:
             # don't re-sanitize trusted output here.
             if not trusted:
                 text = sanitize_external_block(text)
+            # Step 17e gap E — meaning-level content guardrail. Runs AFTER the
+            # deterministic guards and the structural sanitize, on the text that is
+            # about to reach the model. A flagged result is withheld as a
+            # recoverable observation (like the SSRF / pin guards); an *unavailable*
+            # scanner follows fail-open/closed policy. Returns a string to short-
+            # circuit on a block, or None to allow.
+            guard_block = self._guardrail_block(text, tool_name, server, trusted, arg_keys)
+            if guard_block is not None:
+                return guard_block
             self._audit(tool_name, server, trusted, arg_keys, "ok",
                         result_len=len(text), duration_ms=duration_ms)
             # Spotlight ALL tool output with this turn's nonce (Step 17e). The
@@ -413,6 +429,51 @@ class MCPGateway:
             self._audit(tool_name, server, trusted, arg_keys, "exception",
                         error=str(exc), duration_ms=duration_ms)
             return f"MCP tool error: {exc}"
+
+    def _guardrail_block(self, text: str, tool_name: str, server: str, trusted: bool,
+                         arg_keys) -> Optional[str]:
+        """Run the content guardrail on outgoing tool text (Step 17e gap E).
+
+        Returns a recoverable error string when the output must be WITHHELD from the
+        model — either because the classifier flagged it, or because the classifier
+        is unavailable and policy is fail-closed — else ``None`` (allow).
+
+        Scope mirrors the SSRF guard: untrusted-server output only, unless
+        ``AGENT_GUARDRAIL_SCAN_TRUSTED`` is set. The whole feature is a no-op when
+        ``AGENT_GUARDRAIL_ENABLED`` is false or the classifier deps
+        (``transformers``/``torch``) aren't installed (the scan then reports
+        UNAVAILABLE and fail-open lets it through).
+        """
+        if not AGENT_GUARDRAIL_ENABLED:
+            return None
+        if trusted and not AGENT_GUARDRAIL_SCAN_TRUSTED:
+            return None
+
+        result = guardrail.scan_external_text(text, trace_id=self.trace_id)
+
+        if result.verdict == guardrail.Verdict.BLOCK:
+            # The guard worked and flagged the content — always withhold it.
+            self._audit(tool_name, server, trusted, arg_keys, "guardrail_blocked",
+                        reason=result.reason, score=result.score)
+            return (f"Error: the content guardrail flagged tool '{tool_name}' output as a "
+                    f"possible prompt-injection attack and withheld it — {result.reason}")
+
+        if result.verdict == guardrail.Verdict.UNAVAILABLE:
+            if AGENT_GUARDRAIL_FAIL_CLOSED:
+                self._audit(tool_name, server, trusted, arg_keys, "guardrail_blocked",
+                            reason=f"fail-closed: {result.reason}")
+                return (f"Error: the content guardrail is unavailable and policy is "
+                        f"fail-closed, so tool '{tool_name}' output was withheld — "
+                        f"{result.reason}")
+            # Fail-open (the chosen default). Still "loud" without per-call spam: the
+            # engine logs ONCE per process when it can't load (guardrail._get_scanner),
+            # and EVERY fail-open call is recorded in the structured audit trail below.
+            # The nonce wrap + HITL gate remain as backstops.
+            self._audit(tool_name, server, trusted, arg_keys, "guardrail_unavailable",
+                        reason=result.reason)
+            return None
+
+        return None  # ALLOW
 
     def _audit(self, tool, server, trusted, arg_keys, outcome, duration_ms=None, **extra):
         """Emit one uniform audit line per tool dispatch (Step 17e gap A).

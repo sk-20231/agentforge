@@ -7,6 +7,29 @@ name = "agentforge"
 version = "0.1.0"
 requires-python = ">=3.10"
 
+[project.optional-dependencies]
+# Content guardrail (Step 17e gap E). OPTIONAL on purpose: it pulls heavy ML deps
+# (torch / transformers, ~1-2 GB) and the agent runs fine without it (the guardrail
+# lazily no-ops). Install with:  pip install -e ".[guardrail]"
+#
+# We load the injection classifier directly via transformers rather than through the
+# LlamaFirewall framework — LlamaFirewall hard-depends on codeshield→semgrep, which
+# has no native Windows build. Same capability, Windows-clean, smaller footprint.
+#
+# Egress note: inference is FULLY LOCAL (no API calls). The default model
+# (ProtectAI/deberta-v3-base-prompt-injection-v2) is ungated — a one-time, no-login
+# HuggingFace download. (Meta's Prompt Guard 2 is an optional swap via
+# AGENT_GUARDRAIL_MODEL_ID, but it is gated: license + hf login.) See workspace
+# memory feedback_tool_egress_safety for the full runbook.
+guardrail = [
+    "torch>=2.4.1",
+    "transformers>=4.51.3",
+    "huggingface-hub>=0.30.2",
+    # DeBERTa-v3's tokenizer (the default ProtectAI model) is SentencePiece-based.
+    "sentencepiece>=0.2.0",
+    "protobuf>=4.21",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["agentforge*"]

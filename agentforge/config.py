@@ -40,6 +40,53 @@ HISTORY_TOKEN_BUDGET = int(os.environ.get("HISTORY_TOKEN_BUDGET", "2000"))
 # observations pass through untouched; 0 disables compression entirely.
 REACT_OBS_COMPRESS_THRESHOLD = int(os.environ.get("REACT_OBS_COMPRESS_THRESHOLD", "2500"))
 
+# Content guardrail (Step 17e gap E) — a meaning-reading injection/jailbreak
+# classifier (a local HuggingFace model, run directly via `transformers`; ProtectAI
+# DeBERTa by default, Meta Prompt Guard 2 optional) layered ON TOP of the gateway's
+# deterministic guards. Those check the *form* of text (control chars, HTML, SSRF
+# URLs, tool fingerprints); this reads its *intent*. It runs inside gw.call() on
+# untrusted tool OUTPUT, before the nonce wrap.
+#
+# Why the model directly and not the LlamaFirewall framework: LlamaFirewall is the
+# production wrapper, but it hard-depends on codeshield→semgrep, which has no native
+# Windows build, and it drags in openai/typer we don't use. The classifier is just a
+# HuggingFace model, so we load it straight from `transformers` — same capability,
+# smaller + Windows-clean footprint, and a smaller egress surface (better for the
+# no-data-egress rule). See workspace memory feedback_tool_egress_safety.
+#
+# Egress posture: the model runs FULLY LOCALLY (no API calls). `transformers` /
+# `torch` are an OPTIONAL dependency — imported lazily; if absent the guardrail
+# no-ops and the agent runs unchanged.
+def _env_flag(name: str, default: bool) -> bool:
+    """Parse a boolean env var ('1/true/yes' = True), falling back to ``default``."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+# Master switch. On by default, but a no-op unless `transformers`/`torch` are installed.
+AGENT_GUARDRAIL_ENABLED = _env_flag("AGENT_GUARDRAIL_ENABLED", True)
+# Which local injection classifier to load (a HuggingFace repo id, downloaded once,
+# run locally). Default: ProtectAI's DeBERTa-v3 prompt-injection model — UNGATED
+# (Apache-2.0), so no access-approval queue. To use Meta's Prompt Guard 2 instead
+# (gated: requires approved HF access), set this to
+# "meta-llama/Llama-Prompt-Guard-2-86M". The label handling in guardrail.py is
+# model-agnostic (it keys off SAFE/BENIGN vs INJECTION/MALICIOUS), so either works.
+AGENT_GUARDRAIL_MODEL_ID = os.environ.get(
+    "AGENT_GUARDRAIL_MODEL_ID", "ProtectAI/deberta-v3-base-prompt-injection-v2"
+)
+# Malicious-probability cutoff at/above which output is treated as an attack.
+# Raise it to cut false positives, lower it to be stricter (Meta suggests tuning).
+AGENT_GUARDRAIL_THRESHOLD = float(os.environ.get("AGENT_GUARDRAIL_THRESHOLD", "0.5"))
+# When the scanner CANNOT run (model missing / load or scan error): fail OPEN
+# (allow the output through, log loudly) by default — the nonce wrap + HITL gate
+# remain as backstops, and a flaky model load shouldn't brick every tool call.
+# Set true to fail CLOSED (withhold the output) for higher-security deployments.
+AGENT_GUARDRAIL_FAIL_CLOSED = _env_flag("AGENT_GUARDRAIL_FAIL_CLOSED", False)
+# Scan first-party (trusted) server output too? Default false: only untrusted
+# third-party output is scanned, the same scope as the SSRF URL guard.
+AGENT_GUARDRAIL_SCAN_TRUSTED = _env_flag("AGENT_GUARDRAIL_SCAN_TRUSTED", False)
+
 # MCP servers the agent connects to at runtime to discover and call tools.
 #
 # Follows the cross-vendor standard "mcpServers" shape (Claude Desktop / Cursor /

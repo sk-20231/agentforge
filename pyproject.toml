@@ -30,6 +30,16 @@ guardrail = [
     "protobuf>=4.21",
 ]
 
+# Red-team eval harness (agentforge.redteam) — measures the guardrail against a
+# held-out public dataset. Needs the guardrail extra too:  pip install -e ".[guardrail,redteam]"
+# pandas/pyarrow load the parquet dataset (no heavy `datasets` lib); matplotlib is
+# only for the optional chart (numbers print without it).
+redteam = [
+    "pandas>=2.0",
+    "pyarrow>=14",
+    "matplotlib>=3.7",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["agentforge*"]

@@ -32,6 +32,9 @@ memory.json
 tool_pins.json
 /memory/
 
+# Red-team eval outputs (agentforge.redteam) — generated artifacts, not source
+redteam_report.*
+
 # Local test scratch — files generated for manual/edge-case testing only.
 # These are never part of source and must not reach the public repo.
 dinosaurs.md

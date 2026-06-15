@@ -1,11 +1,11 @@
 # AgentForge
 
-> An AI agent built to learn AI engineering deeply. Its core — intent routing, semantic memory, RAG with citation guardrails, ReAct reasoning, evaluation gating in CI, cost tracking, and trace observability — is built from primitives against the OpenAI API to expose every moving part. Tools are then served over **MCP (Model Context Protocol)** through a shared gateway, including a third-party server consumed safely. The goal: understand the internals *and* be fluent with the tools the industry runs on.
+> An AI agent built core-up — both to understand AI engineering deeply and to grow into a genuinely usable agent. Its core — intent routing, semantic memory, RAG with citation guardrails, ReAct reasoning, evaluation gating in CI, cost tracking, and trace observability — is built from primitives against the OpenAI API to expose every moving part. Tools are then served over **MCP (Model Context Protocol)** through a shared gateway, including a third-party server consumed safely. The goal: understand the internals, be fluent with the tools the industry runs on, and harden it toward real, multi-user use.
 
 ![CI](https://github.com/sk-20231/agentforge/actions/workflows/ci.yml/badge.svg)
 ![Eval Gate](https://github.com/sk-20231/agentforge/actions/workflows/eval.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
-![Tests](https://img.shields.io/badge/tests-207_passing-blue)
+![Tests](https://img.shields.io/badge/tests-346_passing-blue)
 
 ---
 

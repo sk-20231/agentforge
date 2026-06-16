@@ -4,7 +4,15 @@ from collections.abc import Iterator
 from openai import OpenAI
 import json
 
-from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL, HISTORY_TOKEN_BUDGET
+from agentforge.config import (
+    OPENAI_MODEL,
+    OPENAI_BASE_URL,
+    HISTORY_TOKEN_BUDGET,
+    AGENT_INPUT_GUARDRAIL_ENABLED,
+    AGENT_OUTPUT_GUARDRAIL_ENABLED,
+)
+from agentforge import guardrail
+from agentforge import output_guardrail
 from agentforge.tools import (
     resume_tool_loop,
     run_llm_with_tools,
@@ -80,6 +88,50 @@ def run_react_agent(user_id: str, user_input: str, max_steps: int = 5,
 VALID_INTENTS = frozenset({"REMEMBER", "ACT", "REACT", "ANSWER", "IGNORE", "RESPOND_WITH_MEMORY", "DOCS_QA"})
 
 
+def _input_guardrail_block(user_input: str, trace_id: str = None) -> str | None:
+    """Scan user input for prompt-injection/jailbreak (issue #22 — INPUT placement point).
+
+    Returns a refusal STRING when the turn must be refused (the classifier flagged the
+    input), else None to proceed. UNAVAILABLE fails OPEN (proceed) — consistent with
+    the gateway's tool-output guardrail default: the input classifier going down must
+    not brick the agent (the model + downstream guards remain). This is the *direct*-
+    injection guard; because the user is also the legitimate command channel it false-
+    positives on role-play, so it is threshold-tunable (AGENT_GUARDRAIL_THRESHOLD) and
+    toggleable (AGENT_INPUT_GUARDRAIL_ENABLED). Mirrors the gateway's _guardrail_block.
+    """
+    if not AGENT_INPUT_GUARDRAIL_ENABLED:
+        return None
+    result = guardrail.scan_external_text(user_input, trace_id=trace_id)
+    if result.verdict == guardrail.Verdict.BLOCK:
+        log_event("input_guardrail_blocked",
+                  {"reason": result.reason, "score": result.score}, trace_id=trace_id)
+        return ("I couldn't process that message — it looked like an attempt to override "
+                "the assistant's instructions. Please rephrase your request.")
+    if result.verdict == guardrail.Verdict.UNAVAILABLE:
+        # Loud-but-cheap: one audited line; the scanner itself logs once per process
+        # when it can't load. Proceed (fail-open).
+        log_event("input_guardrail_unavailable", {"reason": result.reason}, trace_id=trace_id)
+    return None
+
+
+def _scan_output(text, trace_id: str = None):
+    """Redact structured PII from an outgoing reply (issue #22 — OUTPUT placement point).
+
+    No-op when disabled or the text is empty. On redaction, logs the PII TYPES + count
+    (never the values — that would re-leak the PII into the log) and returns the
+    redacted text. Applied to run_agent's NON-streaming string returns; scanning
+    streamed output can't un-send tokens and is a documented follow-up.
+    """
+    if not AGENT_OUTPUT_GUARDRAIL_ENABLED or not isinstance(text, str) or not text:
+        return text
+    result = output_guardrail.scan_output(text)
+    if result.found:
+        log_event("output_guardrail_redacted",
+                  {"types": result.types, "count": result.count}, trace_id=trace_id)
+        return result.redacted_text
+    return text
+
+
 def run_agent(
     user_id: str,
     session_id: str,
@@ -103,6 +155,14 @@ def run_agent(
     # The caller's original list is NOT mutated; trim_history returns a new list.
     tid = trace_id or generate_trace_id()
     log_event("trace_start", {"user_input": user_input, "user_id": user_id}, trace_id=tid)
+
+    # INPUT guardrail (issue #22): scan the user's message for prompt-injection /
+    # jailbreak BEFORE any classification or routing. A flagged message short-circuits
+    # the turn with a refusal — we never classify, retrieve, or call a tool on it.
+    refusal = _input_guardrail_block(user_input, trace_id=tid)
+    if refusal is not None:
+        log_event("trace_end", {"intent": "INPUT_BLOCKED"}, trace_id=tid)
+        return refusal
 
     safe_history = trim_history(history or [], HISTORY_TOKEN_BUDGET)
     log_event("history_trimmed", {
@@ -168,7 +228,7 @@ def run_agent(
             store_memory(user_id, memory_text)
 
         log_event("trace_end", {"intent": intent}, trace_id=tid)
-        return reply
+        return _scan_output(reply, tid)
 
     # -------------------------------
     # REACT (Multi-step reasoning + tools)
@@ -183,21 +243,25 @@ def run_agent(
                                      trace_id=tid)
             span.payload = {"reply_length": len(result)}
         log_event("trace_end", {"intent": intent}, trace_id=tid)
-        return result
+        return _scan_output(result, tid)
 
     # -------------------------------
     # DOCS_QA (RAG — answer from ingested documents)
     # -------------------------------
     if intent == "DOCS_QA":
         log_event("pipeline_start", {"pipeline": "docs_qa"}, trace_id=tid)
-        return answer_from_docs(user_input, history=safe_history, stream=stream, trace_id=tid)
+        result = answer_from_docs(user_input, history=safe_history, stream=stream, trace_id=tid)
+        # Output guardrail on the non-streaming return; a streamed Iterator passes
+        # through (post-hoc scanning of streamed tokens is a documented follow-up).
+        return _scan_output(result, tid) if isinstance(result, str) else result
 
     # -------------------------------
     # ANSWER / MEMORY-AWARE
     # -------------------------------
     if intent in ("ANSWER", "RESPOND_WITH_MEMORY"):
         log_event("pipeline_start", {"pipeline": "answer_with_memory"}, trace_id=tid)
-        return answer_with_memory(user_id, user_input, history=safe_history, stream=stream, trace_id=tid)
+        result = answer_with_memory(user_id, user_input, history=safe_history, stream=stream, trace_id=tid)
+        return _scan_output(result, tid) if isinstance(result, str) else result
 
     # -------------------------------
     # IGNORE

@@ -6,6 +6,7 @@
 ![Eval Gate](https://github.com/sk-20231/agentforge/actions/workflows/eval.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
 ![Tests](https://img.shields.io/badge/tests-346_passing-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -300,4 +301,10 @@ Every message is classified into one of these intents:
 
 - **[`ci.yml`](.github/workflows/ci.yml)** — runs 163 mocked unit tests on every push and PR. Free. No API key required. Takes ~15 seconds.
 - **[`eval.yml`](.github/workflows/eval.yml)** — runs the full eval suite (Recall@K + faithfulness) on push to `main`. Uses a pre-built test corpus fixture so Recall@K costs nothing; only faithfulness scoring calls the API. Gates merges: Recall@K < 70% or faithfulness < 80% → build fails.
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Sayali Kulkarni
 

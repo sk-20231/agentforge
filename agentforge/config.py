@@ -87,6 +87,30 @@ AGENT_GUARDRAIL_FAIL_CLOSED = _env_flag("AGENT_GUARDRAIL_FAIL_CLOSED", False)
 # third-party output is scanned, the same scope as the SSRF URL guard.
 AGENT_GUARDRAIL_SCAN_TRUSTED = _env_flag("AGENT_GUARDRAIL_SCAN_TRUSTED", False)
 
+# --- Guardrail PLACEMENT POINTS beyond tool-call output (issue #22) ----------
+# Gap E above guards the tool-call OUTPUT point. These three flags extend the same
+# meaning-level classifier (and, for output, LLM Guard) to the other points of the
+# four-placement-points model: INPUT / RETRIEVAL / OUTPUT. Each defaults ON but is a
+# no-op unless the underlying model deps are installed (fail-open), exactly like
+# gap E — so a fresh clone without `transformers`/LLM Guard runs unchanged.
+#
+# INPUT: scan the user's message for prompt-injection / jailbreak at the run_agent
+# entry, before intent classification. NOTE this is the *direct*-injection guard and
+# the user is also the legitimate command channel, so it false-positives on role-play
+# ("act as ...") — the deepset FP class. Tune with AGENT_GUARDRAIL_THRESHOLD.
+AGENT_INPUT_GUARDRAIL_ENABLED = _env_flag("AGENT_INPUT_GUARDRAIL_ENABLED", True)
+# RETRIEVAL: scan each RAG chunk at INGEST and skip flagged ones (defense-in-depth).
+# The retrieval-time spotlight WRAP of chunks is unconditional (it is just correct),
+# so this flag governs only the ingest-time classifier scan.
+AGENT_RAG_GUARDRAIL_ENABLED = _env_flag("AGENT_RAG_GUARDRAIL_ENABLED", True)
+# OUTPUT: redact structured PII from the agent's final reply before it is returned
+# (local regex; see agentforge.output_guardrail). Default-on CORE set = secrets / email
+# / SSN / credit-card (rarely legitimate in a reply). The AGGRESSIVE flag additionally
+# redacts IP + phone, which false-positive on legitimate technical answers, so they are
+# OPT-IN. (ML-grade NER for names/addresses + toxicity = a ticketed LLM Guard upgrade.)
+AGENT_OUTPUT_GUARDRAIL_ENABLED = _env_flag("AGENT_OUTPUT_GUARDRAIL_ENABLED", True)
+AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE = _env_flag("AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE", False)
+
 # MCP servers the agent connects to at runtime to discover and call tools.
 #
 # Follows the cross-vendor standard "mcpServers" shape (Claude Desktop / Cursor /

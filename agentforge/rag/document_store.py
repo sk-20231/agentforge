@@ -8,9 +8,14 @@ import os
 import re
 import sys
 
-from agentforge.config import AGENT_CORPUS_FILE, OPENAI_EMBEDDING_MODEL
+from agentforge.config import (
+    AGENT_CORPUS_FILE,
+    OPENAI_EMBEDDING_MODEL,
+    AGENT_RAG_GUARDRAIL_ENABLED,
+)
 from agentforge.memory.semantic import get_embedding, cosine_similarity
 from agentforge.logger import log_event
+from agentforge import guardrail
 
 
 # ---------- Corpus shape ----------
@@ -177,7 +182,24 @@ def add_document(doc_id: str, text: str, source: str) -> int:
         corpus = [c for c in corpus if not c.get("id", "").startswith(prefix)]
         log_event("doc_reingest_replaced", {"doc_id": doc_id, "removed_chunks": existing})
 
+    # RETRIEVAL guardrail — ingest-time scan (issue #22, defense in depth). Each
+    # chunk is classified for prompt-injection before it enters the corpus; a flagged
+    # chunk is SKIPPED (kept out of the knowledge base) and logged. This is offline +
+    # one-time, so the scan cost is fine. No-op (chunk kept) when the classifier is
+    # disabled or its deps are absent — UNAVAILABLE is not BLOCK, so it fails OPEN.
+    # The retrieval-time spotlight wrap (qa._build_prompt) is the always-on companion.
+    added = 0
     for i, chunk in enumerate(chunks):
+        if AGENT_RAG_GUARDRAIL_ENABLED:
+            verdict = guardrail.scan_external_text(chunk)
+            if verdict.verdict == guardrail.Verdict.BLOCK:
+                log_event("rag_ingest_chunk_flagged", {
+                    "doc_id": doc_id,
+                    "chunk_index": i,
+                    "reason": verdict.reason,
+                    "score": verdict.score,
+                })
+                continue  # skip — do not embed or store a flagged chunk
         embedding = get_embedding(chunk)
         corpus.append({
             "id": f"{doc_id}_chunk_{i}",
@@ -185,8 +207,9 @@ def add_document(doc_id: str, text: str, source: str) -> int:
             "embedding": embedding,
             "source": source,
         })
+        added += 1
     save_corpus(corpus)
-    return len(chunks)
+    return added
 
 
 # ---------- Search (retrieve by similarity) ----------
@@ -254,7 +277,15 @@ def ingest_file(file_path: str, doc_id: str = None) -> int:
         text = f.read()
 
     n = add_document(doc_id, text, source)
-    print(f"Ingested '{source}': {n} chunk(s) added (doc_id='{doc_id}').")
+    # Surface any chunks the RAG guardrail flagged + skipped (issue #22) — never
+    # silent. chunk_text is pure, so re-deriving the total here is cheap.
+    total = len(chunk_text(text))
+    skipped = total - n
+    msg = f"Ingested '{source}': {n} chunk(s) added"
+    if skipped > 0:
+        msg += f", {skipped} flagged and skipped by the RAG guardrail"
+    msg += f" (doc_id='{doc_id}')."
+    print(msg)
     return n
 
 

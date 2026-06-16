@@ -8,6 +8,7 @@ import json
 import pytest
 from unittest.mock import patch, MagicMock
 
+from agentforge import guardrail
 from agentforge.rag.document_store import (
     add_document,
     chunk_text,
@@ -16,6 +17,12 @@ from agentforge.rag.document_store import (
     save_corpus,
     search_docs,
 )
+
+
+def _allow():
+    """A guardrail ALLOW result — used to stub the ingest-time scan in tests so no
+    model is loaded (the scan was added for issue #22)."""
+    return guardrail.GuardrailResult(guardrail.Verdict.ALLOW)
 
 
 # ---------- chunk_text (pure, no mocks) ----------
@@ -175,12 +182,14 @@ class TestAddDocumentReingest:
     """Regression (bug #3): re-ingesting a document must REPLACE its previous
     chunks, not append duplicates with the same ids."""
 
+    @patch("agentforge.rag.document_store.guardrail.scan_external_text")
     @patch("agentforge.rag.document_store.log_event")
     @patch("agentforge.rag.document_store.get_embedding")
-    def test_reingest_replaces_not_duplicates(self, mock_emb, _log, tmp_path, monkeypatch):
+    def test_reingest_replaces_not_duplicates(self, mock_emb, _log, mock_scan, tmp_path, monkeypatch):
         path = str(tmp_path / "corpus.json")
         monkeypatch.setattr("agentforge.rag.document_store.AGENT_CORPUS_FILE", path)
         mock_emb.return_value = [0.1, 0.2, 0.3]
+        mock_scan.return_value = _allow()
 
         text = "First paragraph here.\n\nSecond paragraph here."
         n1 = add_document("notes", text, "notes.md")
@@ -193,12 +202,14 @@ class TestAddDocumentReingest:
         ids = [c["id"] for c in second]
         assert len(ids) == len(set(ids)), "no duplicate chunk ids after re-ingest"
 
+    @patch("agentforge.rag.document_store.guardrail.scan_external_text")
     @patch("agentforge.rag.document_store.log_event")
     @patch("agentforge.rag.document_store.get_embedding")
-    def test_reingest_only_replaces_same_doc(self, mock_emb, _log, tmp_path, monkeypatch):
+    def test_reingest_only_replaces_same_doc(self, mock_emb, _log, mock_scan, tmp_path, monkeypatch):
         path = str(tmp_path / "corpus.json")
         monkeypatch.setattr("agentforge.rag.document_store.AGENT_CORPUS_FILE", path)
         mock_emb.return_value = [0.1, 0.2, 0.3]
+        mock_scan.return_value = _allow()
 
         add_document("docA", "Alpha content.", "a.md")
         add_document("docB", "Beta content.", "b.md")

@@ -208,11 +208,13 @@ class TestAttackSet:
                 assert a.target_kind in ("exfil_public", "ssrf")
 
     def test_behavioral_canary_in_payload(self):
-        # The injection must reference its canary so success is detectable. b11 is
-        # the deliberately-obfuscated case (the token is assembled at runtime:
-        # 'REDTEAM' + '_PWNED_' + 'B11'), so the literal won't appear — exempt it.
+        # The injection must reference its canary so success is detectable. Two cases
+        # deliberately obfuscate the canary so the literal won't appear, and are exempt:
+        #   b11 — assembled at runtime ('REDTEAM' + '_PWNED_' + 'B11')
+        #   h2  — base64-encoded in the payload (the harder-attack obfuscation case)
+        _obfuscated = {"b11", "h2"}
         for a in rf.ATTACKS:
-            if a.attack_class == BEHAVIORAL and a.id != "b11":
+            if a.attack_class == BEHAVIORAL and a.id not in _obfuscated:
                 assert a.canary in a.payload
 
     def test_exfil_canary_in_payload_url(self):

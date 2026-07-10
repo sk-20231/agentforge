@@ -103,13 +103,30 @@ AGENT_INPUT_GUARDRAIL_ENABLED = _env_flag("AGENT_INPUT_GUARDRAIL_ENABLED", True)
 # The retrieval-time spotlight WRAP of chunks is unconditional (it is just correct),
 # so this flag governs only the ingest-time classifier scan.
 AGENT_RAG_GUARDRAIL_ENABLED = _env_flag("AGENT_RAG_GUARDRAIL_ENABLED", True)
-# OUTPUT: redact structured PII from the agent's final reply before it is returned
-# (local regex; see agentforge.output_guardrail). Default-on CORE set = secrets / email
-# / SSN / credit-card (rarely legitimate in a reply). The AGGRESSIVE flag additionally
-# redacts IP + phone, which false-positive on legitimate technical answers, so they are
-# OPT-IN. (ML-grade NER for names/addresses + toxicity = a ticketed LLM Guard upgrade.)
+# OUTPUT: redact PII from the agent's final reply before it is returned (see
+# agentforge.output_guardrail). Default-on CORE set = secrets / email / SSN /
+# credit-card / PERSON / ADDRESS. The AGGRESSIVE flag additionally redacts IP + phone,
+# which false-positive on legitimate technical answers, so they are OPT-IN.
 AGENT_OUTPUT_GUARDRAIL_ENABLED = _env_flag("AGENT_OUTPUT_GUARDRAIL_ENABLED", True)
 AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE = _env_flag("AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE", False)
+# ENGINE selects the detector (issue #24). "auto" = use the Presidio + GLiNER ML engine
+# if the optional `[pii]` deps are installed (catches names/addresses via NER + checksum-
+# validated cards), else the always-available zero-dep regex. "regex" forces the regex
+# engine; "presidio" prefers Presidio (the difference from "auto" is intent, not behaviour
+# — tests use it to assert the Presidio path). The regex layer is the FAIL-SAFE for both
+# Presidio modes: a load failure or a mid-scan error degrades to regex, never to no guard.
+AGENT_OUTPUT_GUARDRAIL_ENGINE = os.environ.get("AGENT_OUTPUT_GUARDRAIL_ENGINE", "auto").lower()
+# GLiNER NER model for the Presidio engine. Default is the ungated, Apache-2.0,
+# commercial-OK PII model (person / address / etc.). Pinned so we never silently pull a
+# CC-BY-NC variant. Local inference only; weights are a one-time HuggingFace download.
+AGENT_OUTPUT_GUARDRAIL_MODEL_ID = os.environ.get(
+    "AGENT_OUTPUT_GUARDRAIL_MODEL_ID", "urchade/gliner_multi_pii-v1"
+)
+# Confidence cutoff for the Presidio engine: detections below this score are dropped
+# (filters the low-confidence NER/pattern noise observed at <0.1).
+AGENT_OUTPUT_GUARDRAIL_THRESHOLD = float(
+    os.environ.get("AGENT_OUTPUT_GUARDRAIL_THRESHOLD", "0.4")
+)
 
 # MCP servers the agent connects to at runtime to discover and call tools.
 #

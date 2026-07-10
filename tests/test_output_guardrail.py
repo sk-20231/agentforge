@@ -1,14 +1,27 @@
 """Tests for the OUTPUT guardrail placement point (issue #22).
 
-Pure, local regex PII redaction on the agent's final reply — plus a run_agent
-integration test proving a tool reply's PII is redacted before return.
+The REGEX engine: local PII redaction on the agent's final reply — plus a run_agent
+integration test proving a tool reply's PII is redacted before return. These tests pin
+the engine to "regex" so they stay deterministic regardless of whether the optional
+``[pii]`` (Presidio) extra is installed locally; the Presidio engine has its own tests
+in test_output_guardrail_presidio.py.
 """
 import json
 from unittest.mock import patch
 
+import pytest
+
 from agentforge import guardrail
+from agentforge import output_guardrail
 from agentforge.output_guardrail import scan_output
 from agentforge.main import run_agent
+
+
+@pytest.fixture(autouse=True)
+def _force_regex_engine(monkeypatch):
+    """Pin scan_output to the regex engine for this module (the Presidio engine, when
+    installed, would otherwise handle these and change the expected redactions)."""
+    monkeypatch.setattr(output_guardrail, "AGENT_OUTPUT_GUARDRAIL_ENGINE", "regex")
 
 
 class TestScanOutput:

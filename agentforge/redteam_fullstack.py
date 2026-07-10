@@ -733,14 +733,17 @@ def make_compare_chart(combined: Dict, path: str) -> bool:
 
     The headline is a two-state claim ("X% got through with the classifier on,
     Y% off"), so the primary visual is TWO BARS (off vs on). Beneath it — kept
-    deliberately subordinate — is the classifier-ON run's by-layer attribution
-    (which layer stopped each attack), so one image carries both the on/off
-    contrast and the defense-in-depth story.
+    deliberately subordinate — is the classifier-**OFF** run's by-layer attribution
+    (which layer stopped each attack). We show the OFF run, not ON, on purpose: it
+    is the informative one — it reveals what the *other* layers (spotlighting, model
+    robustness, HITL) catch when the classifier is absent, which is the actual
+    defense-in-depth evidence. Its red "succeeded" bar is the same attacks as the
+    OFF bar up top, so the two panels reconcile.
 
     ``combined`` is the ``--compare`` output: ``{"classifier_on", "classifier_off",
     "asr_gap"}``. Returns False if matplotlib isn't installed.
 
-    NOTE: the lower panel shows where THIS run's attacks ended. It is NOT the
+    NOTE: the lower panel shows where the OFF run's attacks ended. It is NOT the
     ``--forced-fetch`` SSRF pass — its SSRF bar (if any) must not be read as the
     "4/4 SSRF blocked" isolation result, which is a separate run.
     """
@@ -757,7 +760,7 @@ def make_compare_chart(combined: Dict, path: str) -> bool:
     on_asr = on["asr_overall"] * 100
     off_asr = off["asr_overall"] * 100
     n = on.get("n") or off.get("n") or 0
-    layers = list(on.get("blocked_by", {}).items())  # ON-run attribution (subordinate)
+    layers = list(off.get("blocked_by", {}).items())  # OFF-run attribution (subordinate)
 
     if layers:
         fig, (ax_top, ax_bot) = plt.subplots(
@@ -771,7 +774,7 @@ def make_compare_chart(combined: Dict, path: str) -> bool:
         ["guardrail OFF", "guardrail ON"], [off_asr, on_asr],
         color=["#c0392b", "#27ae60"], width=0.6)
     ax_top.set_ylabel("% of attacks that got through (ASR)")
-    ax_top.set_title(f"Full-stack red-team: {n} attacks through the real agent")
+    ax_top.set_title(f"Full-stack red-team: {n} canary attacks run against the real agent")
     ax_top.set_ylim(0, max(off_asr, on_asr, 1.0) * 1.3)
     for bar, val in zip(bars, [off_asr, on_asr]):
         ax_top.annotate(f"{val:.1f}%", (bar.get_x() + bar.get_width() / 2, val),
@@ -784,7 +787,7 @@ def make_compare_chart(combined: Dict, path: str) -> bool:
         colors = ["#c0392b" if k == L_SUCCEEDED else "#7f8c8d" for k in labels]
         ax_bot.bar(labels, counts, color=colors)
         ax_bot.set_ylabel("attacks")
-        ax_bot.set_title("classifier ON — where each attack ended", fontsize=10)
+        ax_bot.set_title("classifier OFF — where each attack ended (the other layers)", fontsize=10)
         ax_bot.tick_params(axis="x", labelrotation=30)
         for lbl in ax_bot.get_xticklabels():
             lbl.set_ha("right")

@@ -1,9 +1,10 @@
-"""Egress invariant for the OUTPUT guardrail (issue #22).
+"""Egress invariant for the OUTPUT guardrail (issues #22, #24).
 
-The output guardrail must redact PII **fully locally** (pure stdlib ``re``) and must
-NEVER import a remote-LLM / network client. If anyone later swaps in a cloud PII API
-(or a heavy framework that phones home), the build fails here. Same spirit as
-tests/test_guardrail_egress.py and tests/test_architecture.py.
+The output guardrail must redact PII **fully locally** — either via the stdlib-``re``
+regex engine or the Presidio + GLiNER engine, both of which run on-device. It must NEVER
+import a remote-LLM / network client or a CLOUD PII SDK (Azure AI Language, AWS
+Comprehend, GCP DLP). If anyone later wires in a cloud recognizer that phones home, the
+build fails here. Same spirit as tests/test_guardrail_egress.py and test_architecture.py.
 """
 import pathlib
 import re
@@ -16,7 +17,12 @@ _IMPORTED_MODULES = {
     for m in re.findall(r"^\s*(?:from|import)\s+([a-zA-Z0-9_\.]+)", _SRC, re.M)
 }
 
-_FORBIDDEN_IMPORTS = {"openai", "together", "requests", "httpx", "aiohttp", "urllib3"}
+# Remote-LLM / network clients AND cloud PII SDKs. Presidio runs locally; a cloud
+# recognizer would pull one of these into THIS file — which is exactly what we forbid.
+_FORBIDDEN_IMPORTS = {
+    "openai", "together", "requests", "httpx", "aiohttp", "urllib3",
+    "boto3", "azure", "google",
+}
 
 
 def test_output_guardrail_imports_no_remote_client():

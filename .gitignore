@@ -32,9 +32,12 @@ memory.json
 tool_pins.json
 /memory/
 
-# Red-team eval outputs (agentforge.redteam / redteam_fullstack) — generated artifacts, not source
-redteam_report.*
-redteam_fullstack_report.*
+# Red-team eval outputs (agentforge.redteam / redteam_fullstack / redteam_pii) —
+# generated artifacts, not source. Globbed (not `.*`) so the --compare / --forced-fetch
+# / per-engine variants (e.g. redteam_fullstack_report_compare.json) are covered too.
+redteam_report*
+redteam_fullstack_report*
+redteam_pii_report*
 
 # Local test scratch — files generated for manual/edge-case testing only.
 # These are never part of source and must not reach the public repo.

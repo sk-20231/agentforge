@@ -728,6 +728,73 @@ def make_chart(report: Dict, path: str) -> bool:
     return True
 
 
+def make_compare_chart(combined: Dict, path: str) -> bool:
+    """ON-vs-OFF attack-success-rate chart for the ``--compare`` artifact.
+
+    The headline is a two-state claim ("X% got through with the classifier on,
+    Y% off"), so the primary visual is TWO BARS (off vs on). Beneath it — kept
+    deliberately subordinate — is the classifier-ON run's by-layer attribution
+    (which layer stopped each attack), so one image carries both the on/off
+    contrast and the defense-in-depth story.
+
+    ``combined`` is the ``--compare`` output: ``{"classifier_on", "classifier_off",
+    "asr_gap"}``. Returns False if matplotlib isn't installed.
+
+    NOTE: the lower panel shows where THIS run's attacks ended. It is NOT the
+    ``--forced-fetch`` SSRF pass — its SSRF bar (if any) must not be read as the
+    "4/4 SSRF blocked" isolation result, which is a separate run.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        logger.warning("matplotlib not installed — skipping chart. (pip install matplotlib)")
+        return False
+
+    on = combined["classifier_on"]
+    off = combined["classifier_off"]
+    on_asr = on["asr_overall"] * 100
+    off_asr = off["asr_overall"] * 100
+    n = on.get("n") or off.get("n") or 0
+    layers = list(on.get("blocked_by", {}).items())  # ON-run attribution (subordinate)
+
+    if layers:
+        fig, (ax_top, ax_bot) = plt.subplots(
+            2, 1, figsize=(8, 6.5), gridspec_kw={"height_ratios": [2, 1]})
+    else:
+        fig, ax_top = plt.subplots(figsize=(8, 4.5))
+        ax_bot = None
+
+    # Primary: OFF vs ON attack success rate (the headline).
+    bars = ax_top.bar(
+        ["guardrail OFF", "guardrail ON"], [off_asr, on_asr],
+        color=["#c0392b", "#27ae60"], width=0.6)
+    ax_top.set_ylabel("% of attacks that got through (ASR)")
+    ax_top.set_title(f"Full-stack red-team: {n} attacks through the real agent")
+    ax_top.set_ylim(0, max(off_asr, on_asr, 1.0) * 1.3)
+    for bar, val in zip(bars, [off_asr, on_asr]):
+        ax_top.annotate(f"{val:.1f}%", (bar.get_x() + bar.get_width() / 2, val),
+                        ha="center", va="bottom", fontsize=12, fontweight="bold")
+
+    # Subordinate: where the ON run's attacks ended (defense-in-depth attribution).
+    if ax_bot is not None:
+        labels = [k for k, _ in layers]
+        counts = [v for _, v in layers]
+        colors = ["#c0392b" if k == L_SUCCEEDED else "#7f8c8d" for k in labels]
+        ax_bot.bar(labels, counts, color=colors)
+        ax_bot.set_ylabel("attacks")
+        ax_bot.set_title("classifier ON — where each attack ended", fontsize=10)
+        ax_bot.tick_params(axis="x", labelrotation=30)
+        for lbl in ax_bot.get_xticklabels():
+            lbl.set_ha("right")
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return True
+
+
 def main(argv: Optional[Sequence[str]] = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description="Full-stack red-team eval of the agent's defense stack.")
@@ -773,11 +840,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         combined = {"classifier_on": on, "classifier_off": off, "asr_gap": gap}
         with open(f"{args.out}_compare.json", "w", encoding="utf-8") as f:
             json.dump(combined, f, indent=2)
+        charted = make_compare_chart(combined, f"{args.out}_compare.png")
         logger.info("\n===== Classifier ON vs OFF (defense-in-depth) =====")
         logger.info("classifier ON  ASR: %.1f%%", on["asr_overall"] * 100)
         logger.info("classifier OFF ASR: %.1f%%", off["asr_overall"] * 100)
         logger.info("gap = classifier's marginal value: %.1f points", gap * 100)
-        logger.info("Report: %s_compare.json", args.out)
+        logger.info("Report: %s_compare.json%s", args.out,
+                    f"  Chart: {args.out}_compare.png" if charted else "")
         return
 
     logger.info("Running %d attacks through the FULL agent (live API + gateway)%s...",

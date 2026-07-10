@@ -10,6 +10,7 @@ from agentforge.config import (
     HISTORY_TOKEN_BUDGET,
     AGENT_INPUT_GUARDRAIL_ENABLED,
     AGENT_OUTPUT_GUARDRAIL_ENABLED,
+    AGENT_CONTEXT_COMPACTION_ENABLED,
 )
 from agentforge import guardrail
 from agentforge import output_guardrail
@@ -28,7 +29,7 @@ from agentforge.memory.response import answer_with_memory
 from agentforge.rag.qa import answer_from_docs
 from agentforge.logger import log_event, generate_trace_id, Span, log_token_usage
 from agentforge.reasoning.react_engine import react_loop, resume_react_loop
-from agentforge.conversation import trim_history, count_tokens
+from agentforge.conversation import trim_history, compact_history, count_tokens
 
 _client = None  # created on first API call, not at import time
 
@@ -164,12 +165,20 @@ def run_agent(
         log_event("trace_end", {"intent": "INPUT_BLOCKED"}, trace_id=tid)
         return refusal
 
-    safe_history = trim_history(history or [], HISTORY_TOKEN_BUDGET)
+    # Context engineering (Step 18a): compaction summarises the oldest turns
+    # instead of deleting them, so the agent keeps the conversation's gist over
+    # long sessions. It degrades to plain trim on any failure, and the flag lets
+    # us fall back to the pure delete-oldest behaviour (Step 2) entirely.
+    if AGENT_CONTEXT_COMPACTION_ENABLED:
+        safe_history = compact_history(history or [], HISTORY_TOKEN_BUDGET, trace_id=tid)
+    else:
+        safe_history = trim_history(history or [], HISTORY_TOKEN_BUDGET)
     log_event("history_trimmed", {
         "original_turns": len(history) // 2 if history else 0,
         "kept_turns": len(safe_history) // 2,
         "estimated_tokens": count_tokens(safe_history),
         "budget": HISTORY_TOKEN_BUDGET,
+        "compaction": AGENT_CONTEXT_COMPACTION_ENABLED,
     }, trace_id=tid)
 
     try:

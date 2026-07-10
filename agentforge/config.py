@@ -32,6 +32,10 @@ AGENT_TOOL_PINS_FILE = os.environ.get("AGENT_TOOL_PINS_FILE", "tool_pins.json")
 # Conservative default leaves room for system prompts + RAG chunks (which can
 # consume 1,000–2,000 tokens on DOCS_QA calls) within most model context windows.
 HISTORY_TOKEN_BUDGET = int(os.environ.get("HISTORY_TOKEN_BUDGET", "2000"))
+# Hard cap on the compaction running-summary length (tokens) — see the
+# AGENT_CONTEXT_COMPACTION_ENABLED block below (defined after _env_flag). Also
+# reserved out of the history budget so summary + kept-recent turns still fit.
+COMPACTION_SUMMARY_MAX_TOKENS = int(os.environ.get("AGENT_COMPACTION_SUMMARY_MAX_TOKENS", "256"))
 
 # ReAct observation compression threshold, in characters (issue #8). A tool
 # observation longer than this is compressed by one query-focused LLM call
@@ -63,6 +67,18 @@ def _env_flag(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
+
+# CONTEXT ENGINEERING — compaction (Step 18a). When history exceeds the budget,
+# the default (Step 2) behaviour was to DELETE the oldest turns outright, losing
+# their information forever. With compaction ON, those oldest turns are instead
+# summarised into a single running summary message (names / IDs / decisions /
+# open tasks preserved) that rides at the front of the history — so the agent
+# keeps the gist of the whole conversation, not just the last few turns.
+# Compaction only fires when history is OVER budget (zero added cost on the
+# common path) and FAILS SAFE: if the summary LLM call errors or returns empty,
+# it degrades to the original delete-oldest trim (never worse than Step 2).
+# (Cap on the summary length lives in COMPACTION_SUMMARY_MAX_TOKENS, above.)
+AGENT_CONTEXT_COMPACTION_ENABLED = _env_flag("AGENT_CONTEXT_COMPACTION_ENABLED", True)
 
 # Master switch. On by default, but a no-op unless `transformers`/`torch` are installed.
 AGENT_GUARDRAIL_ENABLED = _env_flag("AGENT_GUARDRAIL_ENABLED", True)

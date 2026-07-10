@@ -20,8 +20,13 @@ Upgrade path for count_tokens(): replace char estimate with tiktoken:
 import logging
 
 from openai import OpenAI
-from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
-from agentforge.logger import log_token_usage
+from agentforge.config import (
+    OPENAI_MODEL,
+    OPENAI_BASE_URL,
+    COMPACTION_SUMMARY_MAX_TOKENS,
+)
+from agentforge.logger import log_token_usage, log_event
+from agentforge.prompts import COMPACTION_PROMPT
 
 _client = None  # created on first API call, not at import time
 
@@ -110,6 +115,143 @@ def trim_history(history: list[dict], budget: int) -> list[dict]:
         )
 
     return trimmed
+
+
+# ---------- Compaction (context engineering, Step 18a) ----------
+
+# The running summary rides at the FRONT of the history as a system message with
+# this exact prefix, so the next turn can recognise its own prior summary and
+# fold new drops into it (one running summary, never a stack of them).
+_SUMMARY_ROLE = "system"
+_SUMMARY_PREFIX = "[Conversation summary so far]"
+
+
+def _is_summary(msg: dict) -> bool:
+    """True if ``msg`` is a running-summary message produced by a prior compaction."""
+    return (
+        msg.get("role") == _SUMMARY_ROLE
+        and (msg.get("content") or "").startswith(_SUMMARY_PREFIX)
+    )
+
+
+def _summary_message(summary_text: str) -> dict:
+    """Wrap summary text in the tagged system message the next turn can recognise."""
+    return {"role": _SUMMARY_ROLE, "content": f"{_SUMMARY_PREFIX}\n{summary_text}"}
+
+
+def compact_history(history: list[dict], budget: int, trace_id: str = None) -> list[dict]:
+    """Return a copy of history within ``budget`` — summarising the oldest turns
+    instead of deleting them (contrast :func:`trim_history`, which drops them).
+
+    Why (context engineering): blunt trimming loses old facts forever ("what
+    language did I say I was using?" fails 40 turns later). Compaction keeps the
+    *gist* of the dropped turns as a single running summary that rides at the
+    front of the history, so the agent stays coherent over long conversations
+    without carrying every token. Durable user facts still belong in semantic
+    memory; this preserves the *conversational* thread.
+
+    Design:
+    - **Common path is free.** If history already fits the budget, it is returned
+      unchanged with NO LLM call (same zero-cost-under-threshold shape as the
+      ReAct observation compressor).
+    - **One running summary.** If the history already starts with a prior summary,
+      the newly-dropped turns are folded INTO it, so summaries never stack.
+    - **Budget-aware.** ``COMPACTION_SUMMARY_MAX_TOKENS`` is reserved out of the
+      budget, so ``summary + kept-recent-turns`` still fits within ``budget``.
+    - **Fails safe.** If the summary LLM call errors or returns empty, it degrades
+      to the delete-oldest behaviour of :func:`trim_history` — never weaker than
+      Step 2, and a summariser hiccup never blocks the turn.
+    - Never mutates the caller's list; never logs message content values.
+
+    Args:
+        history:  Full conversation history (role/content dicts).
+        budget:   Maximum estimated tokens allowed (from HISTORY_TOKEN_BUDGET).
+        trace_id: Optional trace ID for linking the compaction LLM call to a run.
+
+    Returns:
+        A new list: ``[running_summary] + most_recent_turns`` when compaction
+        fired, or the (copied) history unchanged when it already fit.
+    """
+    if not history:
+        return []
+
+    # Common path: already within budget — no summary, no LLM call, no change.
+    if count_tokens(history) <= budget:
+        return list(history)
+
+    # Separate any existing running summary from the real turns so we can fold
+    # new drops into it rather than stacking a second summary.
+    turns = list(history)
+    prior_summary = ""
+    if turns and _is_summary(turns[0]):
+        prior_summary = turns[0]["content"][len(_SUMMARY_PREFIX):].strip()
+        turns = turns[1:]
+
+    # Reserve room for the summary we'll prepend so the RESULT stays within budget.
+    reserve = COMPACTION_SUMMARY_MAX_TOKENS + 4  # +4 = per-message overhead
+    keep_budget = max(0, budget - reserve)
+
+    # Split: keep the most-recent turns that fit keep_budget verbatim; the older
+    # overflow (oldest first) is what we summarise. Always keep the last 2 msgs.
+    kept = turns
+    dropped: list[dict] = []
+    while count_tokens(kept) > keep_budget and len(kept) > 2:
+        dropped.extend(kept[:2])   # oldest user+assistant pair, chronological order
+        kept = kept[2:]
+
+    if not dropped:
+        # Over budget only because of the prior summary (turns alone fit). Re-attach
+        # the prior summary unchanged — no new turns to fold, so no LLM call.
+        return ([_summary_message(prior_summary)] if prior_summary else []) + kept
+
+    # Build the summariser input: prior summary (if any) + the dropped turns.
+    payload_parts = []
+    if prior_summary:
+        payload_parts.append(f"Previous summary:\n{prior_summary}")
+    dropped_text = "\n".join(
+        f"{m.get('role', 'user').capitalize()}: {m.get('content') or ''}" for m in dropped
+    )
+    payload_parts.append(f"Oldest turns to fold in:\n{dropped_text}")
+    payload = "\n\n".join(payload_parts)
+
+    try:
+        response = _get_client().chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": COMPACTION_PROMPT},
+                {"role": "user", "content": payload},
+            ],
+            max_tokens=COMPACTION_SUMMARY_MAX_TOKENS,
+            temperature=0,  # deterministic: same drops -> same summary
+        )
+        log_token_usage(response, "history_compaction", trace_id=trace_id)
+        summary = (response.choices[0].message.content or "").strip()
+    except Exception as exc:
+        # Fail safe: degrade to delete-oldest trim (keep any prior summary).
+        logger.warning(
+            "compact_history: summary failed (%s); degrading to delete-oldest trim.", exc
+        )
+        log_event("history_compaction_failed", {"error": str(exc)}, trace_id=trace_id)
+        return ([_summary_message(prior_summary)] if prior_summary else []) + kept
+
+    if not summary:
+        logger.warning("compact_history: empty summary; degrading to delete-oldest trim.")
+        return ([_summary_message(prior_summary)] if prior_summary else []) + kept
+
+    result = [_summary_message(summary)] + kept
+    log_event("history_compacted", {
+        "dropped_msgs": len(dropped),
+        "kept_msgs": len(kept),
+        "had_prior_summary": bool(prior_summary),
+        "result_tokens": count_tokens(result),
+        "budget": budget,
+    }, trace_id=trace_id)
+    logger.info(
+        "compact_history: folded %d messages into a running summary; "
+        "kept %d recent messages (~%d tokens, budget %d).",
+        len(dropped), len(kept), count_tokens(result), budget,
+    )
+    return result
 
 
 # ---------- Query rewriting ----------

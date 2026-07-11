@@ -1,0 +1,66 @@
+[
+  {
+    "id": "traj_001",
+    "task": "What is the current weather in Tokyo?",
+    "expected_tools": ["get_weather"],
+    "expected_outcome": "A current weather report for Tokyo (temperature and/or conditions).",
+    "expected_substrings": ["Tokyo"],
+    "difficulty": "easy"
+  },
+  {
+    "id": "traj_002",
+    "task": "Give me the top news headlines about artificial intelligence.",
+    "expected_tools": ["get_top_news"],
+    "expected_outcome": "One or more recent news headlines related to artificial intelligence.",
+    "expected_substrings": [],
+    "difficulty": "easy"
+  },
+  {
+    "id": "traj_003",
+    "task": "Look up a short summary of the Eiffel Tower on Wikipedia.",
+    "expected_tools": ["search_wikipedia"],
+    "expected_outcome": "A brief factual summary of the Eiffel Tower drawn from Wikipedia.",
+    "expected_substrings": ["Eiffel"],
+    "difficulty": "easy"
+  },
+  {
+    "id": "traj_004",
+    "task": "What is the weather in Paris right now, and what are the top news headlines about Paris?",
+    "expected_tools": ["get_weather", "get_top_news"],
+    "expected_outcome": "Both a current weather report for Paris and recent news headlines mentioning Paris.",
+    "expected_substrings": ["Paris"],
+    "difficulty": "medium"
+  },
+  {
+    "id": "traj_005",
+    "task": "Give me a Wikipedia summary of quantum computing and also today's top technology news.",
+    "expected_tools": ["search_wikipedia", "get_top_news"],
+    "expected_outcome": "A short factual summary of quantum computing plus recent technology news headlines.",
+    "expected_substrings": ["quantum"],
+    "difficulty": "medium"
+  },
+  {
+    "id": "traj_006",
+    "task": "What is 12 plus 30? Just give me the number, no tools needed.",
+    "expected_tools": [],
+    "expected_outcome": "The answer 42, given directly without calling any tool.",
+    "expected_substrings": ["42"],
+    "difficulty": "easy"
+  },
+  {
+    "id": "traj_007",
+    "task": "Look up the Great Wall of China on Wikipedia and tell me which country it is in.",
+    "expected_tools": ["search_wikipedia"],
+    "expected_outcome": "Confirmation, based on Wikipedia, that the Great Wall is in China.",
+    "expected_substrings": ["China"],
+    "difficulty": "medium"
+  },
+  {
+    "id": "traj_008",
+    "task": "Find the capital of Japan on Wikipedia, then tell me the current weather in that city.",
+    "expected_tools": ["search_wikipedia", "get_weather"],
+    "expected_outcome": "Identifies Tokyo as Japan's capital from Wikipedia and then reports Tokyo's current weather.",
+    "expected_substrings": ["Tokyo"],
+    "difficulty": "hard"
+  }
+]

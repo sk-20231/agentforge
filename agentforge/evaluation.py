@@ -355,10 +355,386 @@ def run_faithfulness_eval(
     }
 
 
+# ---------------------------------------------------------------------------
+# Step 19 — Agent-trajectory evaluation (score the PATH, not just the answer)
+# ---------------------------------------------------------------------------
+#
+# Phase 4 (above) grades RAG *answers*: Recall@K and faithfulness. Neither can
+# see the agent layer — which tool it picked, whether it finished the task,
+# whether the ReAct loop converged instead of spinning. Step 19 adds three
+# scorers over the ReAct trajectory that ``logger.reconstruct_trajectory`` reads
+# back from the trace log:
+#
+#   - score_tool_selection  — PURE. Did it call the right tools? (set-recall)
+#   - score_loop_health     — PURE. Did the loop terminate, not hit the ceiling?
+#   - score_task_completion — LLM-judge (like faithfulness), with a deterministic
+#                             substring fallback so unit tests need no API.
+#
+# Why the split matters: the two pure scorers run free and deterministically in
+# CI on every commit; only the judge is non-deterministic and costs tokens. The
+# deterministic pair is the trustworthy CI backbone; the judge is isolated.
+
+DEFAULT_TRAJECTORY_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "tests", "trajectory_eval_dataset.json"
+)
+
+TRAJECTORY_REQUIRED_FIELDS = {"id", "task", "expected_tools", "expected_outcome"}
+
+
+def load_trajectory_dataset(path: str = None) -> list[dict]:
+    """Load and validate the trajectory eval dataset.
+
+    Each entry needs: id, task (the user input), expected_tools (list — may be
+    empty for a no-tool task), expected_outcome (goal text for the judge).
+    Optional: expected_substrings (deterministic completion check), difficulty.
+    Raises ValueError on a malformed dataset — same contract as
+    ``load_eval_dataset`` so the failure mode is familiar.
+    """
+    path = os.path.abspath(path or DEFAULT_TRAJECTORY_PATH)
+    logger.info("Loading trajectory eval dataset from %s", path)
+
+    with open(path, encoding="utf-8") as f:
+        dataset = json.load(f)
+
+    if not isinstance(dataset, list) or len(dataset) == 0:
+        raise ValueError(
+            f"Trajectory dataset must be a non-empty JSON array, got {type(dataset).__name__}"
+        )
+
+    seen_ids = set()
+    for i, entry in enumerate(dataset):
+        missing = TRAJECTORY_REQUIRED_FIELDS - set(entry.keys())
+        if missing:
+            raise ValueError(f"Entry {i} missing fields: {missing}")
+        if entry["id"] in seen_ids:
+            raise ValueError(f"Duplicate trajectory eval id: {entry['id']}")
+        seen_ids.add(entry["id"])
+        # expected_tools may be empty (a no-tool task), but must be a list.
+        if not isinstance(entry["expected_tools"], list):
+            raise ValueError(f"Entry {entry['id']}: expected_tools must be a list")
+
+    logger.info("Loaded %d trajectory examples (IDs: %s)",
+                len(dataset), [e["id"] for e in dataset])
+    return dataset
+
+
+def score_tool_selection(expected_tools: list[str], tools_called: list[str]) -> dict:
+    """PURE. Did the agent call the right tools? Set-recall + flag extras.
+
+    We deliberately do NOT require exact order or forbid harmless extra steps —
+    that mirrors ``recall_at_k`` and avoids over-fitting to one "correct" path.
+      recall     = |expected ∩ called| / |expected|   (1.0 when nothing expected)
+      missing    = expected tools that were never called
+      unexpected = tools called that were not expected
+      correct    = the strict view: nothing missing AND nothing unexpected
+    """
+    expected = set(expected_tools)
+    called = set(tools_called)
+
+    matched = sorted(expected & called)
+    missing = sorted(expected - called)
+    unexpected = sorted(called - expected)
+    recall = 1.0 if not expected else len(expected & called) / len(expected)
+
+    return {
+        "recall": recall,
+        "matched": matched,
+        "missing": missing,
+        "unexpected": unexpected,
+        "correct": not missing and not unexpected,
+    }
+
+
+def score_loop_health(trajectory: dict, max_steps: int) -> dict:
+    """PURE. Did the ReAct loop converge, or spin until it hit the ceiling?
+
+    ``trajectory`` comes from ``logger.reconstruct_trajectory``. A healthy loop
+    produced a final answer without exhausting ``max_steps``; hitting the ceiling
+    means the agent never decided it was done — the classic runaway-cost /
+    non-termination failure.
+    """
+    hit_ceiling = not trajectory.get("terminated_cleanly", False)
+    return {
+        "healthy": not hit_ceiling,
+        "steps_taken": trajectory.get("steps_taken", 0),
+        "max_steps": max_steps,
+        "hit_ceiling": hit_ceiling,
+    }
+
+
+TASK_COMPLETION_JUDGE_PROMPT = """\
+You are an impartial judge deciding whether an AI agent COMPLETED the user's task.
+
+You will receive:
+- The user's TASK (what they asked the agent to do)
+- The EXPECTED OUTCOME (what a successful result looks like)
+- The agent's FINAL ANSWER
+
+Respond in JSON with exactly two fields:
+{
+  "completed": true or false,
+  "reason": "one-sentence explanation of your verdict"
+}
+
+Rules:
+- "completed" is true only if the final answer actually satisfies the task and
+  is consistent with the expected outcome.
+- A fluent answer that does NOT address the task is NOT complete.
+- An answer that says it could not do the task is NOT complete.
+- Minor wording differences from the expected outcome are fine.
+"""
+
+
+def score_task_completion(
+    task: str,
+    final_answer: str,
+    expected_outcome: str,
+    expected_substrings: list[str] = None,
+    use_judge: bool = True,
+) -> dict:
+    """Did the agent finish the task? LLM-judge, or deterministic substrings.
+
+    ``use_judge=True`` (default, the real metric) asks an LLM — same
+    LLM-as-judge pattern as ``score_faithfulness``. ``use_judge=False`` runs a
+    free, deterministic substring check instead (all ``expected_substrings``
+    must appear, case-insensitively) — this is what the hermetic unit tests use
+    so they never touch the API.
+
+    Returns {"completed": bool, "reason": str, "method": "judge"|"substring"}.
+    """
+    if not use_judge:
+        if not expected_substrings:
+            return {"completed": False,
+                    "reason": "deterministic check needs expected_substrings",
+                    "method": "substring"}
+        haystack = (final_answer or "").lower()
+        missing = [s for s in expected_substrings if s.lower() not in haystack]
+        completed = not missing
+        reason = ("all expected substrings present" if completed
+                  else f"missing substrings: {missing}")
+        return {"completed": completed, "reason": reason, "method": "substring"}
+
+    from openai import OpenAI
+    from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
+
+    _client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+
+    user_message = (
+        f"TASK:\n{task}\n\n"
+        f"EXPECTED OUTCOME:\n{expected_outcome}\n\n"
+        f"FINAL ANSWER:\n{final_answer}"
+    )
+    try:
+        response = _client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": TASK_COMPLETION_JUDGE_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            response_format={"type": "json_object"},
+        )
+        data = json.loads(response.choices[0].message.content)
+        return {
+            "completed": bool(data.get("completed", False)),
+            "reason": data.get("reason", ""),
+            "method": "judge",
+        }
+    except Exception as exc:
+        logger.error("score_task_completion failed: %s", exc)
+        return {"completed": False, "reason": f"Judge error: {exc}", "method": "judge"}
+
+
+def run_trajectory_eval(
+    dataset: list[dict],
+    max_steps: int = 5,
+    verbose: bool = True,
+) -> dict:
+    """Run each task LIVE through the real ReAct loop, then score its trajectory.
+
+    For each entry:
+      1. mint a trace_id and run ``react_loop(..., trace_id=tid)``  (live)
+      2. ``reconstruct_trajectory(tid)``  → the path it actually took
+      3. score tool-selection (pure), loop-health (pure), completion (judge)
+
+    A task that errors or interrupts (e.g. hits a human-approval gate) is
+    recorded as a failed task rather than aborting the whole run — one bad task
+    must not cancel the loop.
+
+    Returns overall {tool_selection, task_completion, loop_health} plus
+    per_task detail and by_difficulty breakdowns.
+    """
+    from agentforge.reasoning.react_engine import react_loop
+    from agentforge.logger import generate_trace_id, reconstruct_trajectory
+
+    per_task = []
+    tool_recall_sum = 0.0
+    completed_count = 0
+    healthy_count = 0
+    difficulty_buckets: dict[str, dict] = {}
+
+    for i, entry in enumerate(dataset):
+        task = entry["task"]
+        expected_tools = entry["expected_tools"]
+        expected_outcome = entry["expected_outcome"]
+        difficulty = entry.get("difficulty", "unknown")
+        tid = generate_trace_id()
+
+        if verbose:
+            print(f"[{i+1}/{len(dataset)}] {entry['id']} ({difficulty})")
+            print(f"  Task: {task}")
+
+        try:
+            final_answer = react_loop(
+                user_id="trajectory_eval", user_input=task,
+                max_steps=max_steps, trace_id=tid,
+            )
+            error = None
+        except Exception as exc:  # incl. ApprovalRequired if a task gates a tool
+            logger.error("Trajectory task %s crashed: %s", entry["id"], exc)
+            final_answer = ""
+            error = str(exc)
+
+        trajectory = reconstruct_trajectory(tid)
+        tool = score_tool_selection(expected_tools, trajectory["tools_called"])
+        loop = score_loop_health(trajectory, max_steps)
+        completion = score_task_completion(task, final_answer, expected_outcome)
+
+        tool_recall_sum += tool["recall"]
+        if completion["completed"]:
+            completed_count += 1
+        if loop["healthy"]:
+            healthy_count += 1
+
+        b = difficulty_buckets.setdefault(
+            difficulty, {"tool_recall": 0.0, "completed": 0, "healthy": 0, "total": 0})
+        b["total"] += 1
+        b["tool_recall"] += tool["recall"]
+        b["completed"] += 1 if completion["completed"] else 0
+        b["healthy"] += 1 if loop["healthy"] else 0
+
+        detail = {
+            "id": entry["id"],
+            "task": task,
+            "difficulty": difficulty,
+            "trace_id": tid,
+            "expected_tools": expected_tools,
+            "tools_called": trajectory["tools_called"],
+            "tool_selection": tool,
+            "loop_health": loop,
+            "completion": completion,
+            "error": error,
+        }
+        per_task.append(detail)
+
+        if verbose:
+            flags = []
+            flags.append("TOOLS OK" if tool["correct"] else f"TOOLS off ({tool['recall']:.0%})")
+            flags.append("DONE" if completion["completed"] else "INCOMPLETE")
+            flags.append("CONVERGED" if loop["healthy"] else "HIT CEILING")
+            print(f"  Called: {trajectory['tools_called']}  [{' | '.join(flags)}]")
+            if tool["missing"]:
+                print(f"  MISSING tools: {tool['missing']}")
+            if tool["unexpected"]:
+                print(f"  UNEXPECTED tools: {tool['unexpected']}")
+            if error:
+                print(f"  ERROR: {error}")
+            print()
+
+    total = len(dataset)
+    by_difficulty = {
+        d: {
+            "tool_selection": b["tool_recall"] / b["total"] if b["total"] else 0.0,
+            "task_completion": b["completed"] / b["total"] if b["total"] else 0.0,
+            "loop_health": b["healthy"] / b["total"] if b["total"] else 0.0,
+            "total": b["total"],
+        }
+        for d, b in difficulty_buckets.items()
+    }
+
+    result = {
+        "tool_selection": tool_recall_sum / total if total else 0.0,
+        "task_completion": completed_count / total if total else 0.0,
+        "loop_health": healthy_count / total if total else 0.0,
+        "total": total,
+        "per_task": per_task,
+        "by_difficulty": by_difficulty,
+    }
+    logger.info(
+        "Trajectory eval complete: tool-selection %.0f%%, completion %.0f%%, loop-health %.0f%% (n=%d)",
+        result["tool_selection"] * 100, result["task_completion"] * 100,
+        result["loop_health"] * 100, total,
+    )
+    return result
+
+
 if __name__ == "__main__":
     import sys
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    # --- Step 19: trajectory eval is a self-contained mode (no corpus needed) ---
+    if "--trajectory" in sys.argv:
+        max_steps = 5
+        for arg in sys.argv:
+            if arg.startswith("--max-steps="):
+                max_steps = int(arg.split("=")[1])
+
+        TOOL_SELECTION_THRESHOLD = 0.8
+        COMPLETION_THRESHOLD = 0.8
+        LOOP_HEALTH_THRESHOLD = 0.9
+
+        traj_dataset = load_trajectory_dataset()
+        print(f"\n{'='*60}")
+        print(f"  Running Agent-Trajectory Eval (live ReAct, max_steps={max_steps})")
+        print(f"{'='*60}\n")
+
+        traj = run_trajectory_eval(traj_dataset, max_steps=max_steps, verbose=True)
+
+        print(f"{'='*60}")
+        print(f"  Tool-selection : {traj['tool_selection']:.0%}")
+        print(f"  Task-completion: {traj['task_completion']:.0%}")
+        print(f"  Loop-health    : {traj['loop_health']:.0%}")
+        print()
+        print("  By difficulty:")
+        for diff, s in sorted(traj["by_difficulty"].items()):
+            print(f"    {diff:8s}: tools {s['tool_selection']:.0%}, "
+                  f"done {s['task_completion']:.0%}, loop {s['loop_health']:.0%} "
+                  f"(n={s['total']})")
+        print(f"{'='*60}")
+
+        # Read the misses — eval-honesty rule: never report only the headline.
+        misses = [t for t in traj["per_task"]
+                  if not (t["tool_selection"]["correct"]
+                          and t["completion"]["completed"]
+                          and t["loop_health"]["healthy"])]
+        if misses:
+            print(f"\n  {len(misses)} task(s) with a miss:")
+            for t in misses:
+                bits = []
+                if not t["tool_selection"]["correct"]:
+                    bits.append(f"tools missing={t['tool_selection']['missing']} "
+                                f"extra={t['tool_selection']['unexpected']}")
+                if not t["completion"]["completed"]:
+                    bits.append(f"incomplete: {t['completion']['reason']}")
+                if not t["loop_health"]["healthy"]:
+                    bits.append("hit step ceiling")
+                if t["error"]:
+                    bits.append(f"error: {t['error']}")
+                print(f"    {t['id']}: {'; '.join(bits)}")
+
+        failed = (
+            traj["tool_selection"] < TOOL_SELECTION_THRESHOLD
+            or traj["task_completion"] < COMPLETION_THRESHOLD
+            or traj["loop_health"] < LOOP_HEALTH_THRESHOLD
+        )
+        if failed:
+            print(f"\nFAIL: a trajectory metric is below threshold "
+                  f"(tools≥{TOOL_SELECTION_THRESHOLD:.0%}, "
+                  f"done≥{COMPLETION_THRESHOLD:.0%}, "
+                  f"loop≥{LOOP_HEALTH_THRESHOLD:.0%}).")
+        else:
+            print(f"\nPASS: all trajectory metrics meet threshold.")
+        sys.exit(1 if failed else 0)
 
     dataset = load_eval_dataset()
     print(f"\nLoaded {len(dataset)} eval examples:\n")

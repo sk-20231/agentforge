@@ -225,6 +225,81 @@ def compute_trace_cost(trace_id: str, log_path: str = None) -> dict:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Step 19 — Agent-trajectory reconstruction (traces become eval inputs)
+# ---------------------------------------------------------------------------
+
+def reconstruct_trajectory(trace_id: str, log_path: str = None) -> dict:
+    """Rebuild a ReAct turn's *path* from the trace log, keyed by trace_id.
+
+    Step 13 already logs everything a trajectory eval needs — this reader just
+    stitches the per-turn events back together (same "read JSONL, filter by
+    trace_id" shape as ``compute_trace_cost``). Nothing in the ReAct loop had to
+    change: the observability built earlier IS the eval input.
+
+    The events it reads (emitted by ``reasoning/react_engine.py``):
+      - ``react_step``  → one per reasoning step; ``action_type`` + ``tool_name``.
+        The ordered tool calls are the steps where ``action_type == "tool"``.
+      - ``react_end``   → ``steps_taken`` and ``reply_length``; carries
+        ``stopped == "max_steps"`` ONLY when the loop hit its ceiling without
+        finishing (that is the loop-health signal).
+
+    Returns:
+        {
+          "trace_id": "...",
+          "found": True,                 # False if no react_* events for this id
+          "tools_called": ["get_weather", "get_top_news"],  # in call order
+          "steps_taken": 3,
+          "terminated_cleanly": True,    # False when the loop hit max_steps
+          "final_reply_length": 42,      # 0 when it never produced a final reply
+        }
+    """
+    path = log_path or AGENT_LOG_FILE
+    tools_called: list[str] = []
+    steps_taken = 0
+    terminated_cleanly = False
+    final_reply_length = 0
+    found = False
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("trace_id") != trace_id:
+                    continue
+                event = record.get("event")
+                p = record.get("payload", {})
+
+                if event == "react_step":
+                    found = True
+                    if p.get("action_type") == "tool" and p.get("tool_name"):
+                        tools_called.append(p["tool_name"])
+                elif event == "react_end":
+                    found = True
+                    steps_taken = p.get("steps_taken", steps_taken)
+                    final_reply_length = p.get("reply_length", 0)
+                    # The loop only tags react_end with stopped="max_steps" when
+                    # it ran out of steps. Any other end is a clean termination.
+                    terminated_cleanly = p.get("stopped") != "max_steps"
+    except FileNotFoundError:
+        pass
+
+    return {
+        "trace_id": trace_id,
+        "found": found,
+        "tools_called": tools_called,
+        "steps_taken": steps_taken,
+        "terminated_cleanly": terminated_cleanly,
+        "final_reply_length": final_reply_length,
+    }
+
+
 def compute_latency_percentiles(log_path: str = None) -> dict:
     """Read the log file and compute P50/P95 latency per event type.
 

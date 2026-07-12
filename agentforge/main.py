@@ -14,6 +14,7 @@ from agentforge.config import (
 )
 from agentforge import guardrail
 from agentforge import output_guardrail
+from agentforge.router import choose_model
 from agentforge.tools import (
     resume_tool_loop,
     run_llm_with_tools,
@@ -81,10 +82,16 @@ def stream_llm_answer(user_input: str, trace_id: str = None) -> Iterator[str]:
 
 
 def run_react_agent(user_id: str, user_input: str, max_steps: int = 5,
-                    approval_handler=None, trace_id: str = None) -> str:
-    """Delegates to the memory-aware ReAct loop."""
+                    approval_handler=None, trace_id: str = None,
+                    model: str = None) -> str:
+    """Delegates to the memory-aware ReAct loop.
+
+    ``model`` (Step 28) is the routed model — REACT is the hard intent, so
+    run_agent routes it to the frontier tier. None → OPENAI_MODEL.
+    """
     return react_loop(user_id, user_input, max_steps,
-                      approval_handler=approval_handler, trace_id=trace_id)
+                      approval_handler=approval_handler, trace_id=trace_id,
+                      model=model)
 
 VALID_INTENTS = frozenset({"REMEMBER", "ACT", "REACT", "ANSWER", "IGNORE", "RESPOND_WITH_MEMORY", "DOCS_QA"})
 
@@ -198,6 +205,22 @@ def run_agent(
 
     print(f"\n[Intent] {intent} — {reason}")
 
+    # MODEL ROUTING (Step 28): pick a model sized to this turn's difficulty. The
+    # intent we just classified IS the (free) difficulty estimate — REACT escalates
+    # to the frontier tier, everything else stays on the small tier. A low-confidence
+    # classification routes UP (never silently degrade). ``route.model`` is threaded
+    # into whichever pipeline runs below; REMEMBER/IGNORE make no LLM call so they
+    # ignore it. With the default config (frontier == small) this is a logged no-op.
+    route = choose_model(intent, low_confidence=intent_data.get("low_confidence", False))
+    log_event("model_routed", {
+        "intent": intent,
+        "tier": route.tier,
+        "model": route.model,
+        "difficulty": route.difficulty,
+        "reason": route.reason,
+    }, trace_id=tid)
+    print(f"[Route] {route.tier} tier → {route.model} ({route.reason})")
+
     # -------------------------------
     # REMEMBER
     # -------------------------------
@@ -220,7 +243,8 @@ def run_agent(
     if intent == "ACT":
         with Span("act_tool_pipeline", trace_id=tid) as span:
             tool_output = run_llm_with_tools(user_id, user_input, trace_id=tid,
-                                             approval_handler=approval_handler)
+                                             approval_handler=approval_handler,
+                                             model=route.model)
             try:
                 tool_output = json.loads(tool_output)
             except json.JSONDecodeError:
@@ -249,7 +273,7 @@ def run_agent(
             # turn and per-trace cost reports undercounted REACT turns.
             result = run_react_agent(user_id, user_input,
                                      approval_handler=approval_handler,
-                                     trace_id=tid)
+                                     trace_id=tid, model=route.model)
             span.payload = {"reply_length": len(result)}
         log_event("trace_end", {"intent": intent}, trace_id=tid)
         return _scan_output(result, tid)
@@ -259,7 +283,8 @@ def run_agent(
     # -------------------------------
     if intent == "DOCS_QA":
         log_event("pipeline_start", {"pipeline": "docs_qa"}, trace_id=tid)
-        result = answer_from_docs(user_input, history=safe_history, stream=stream, trace_id=tid)
+        result = answer_from_docs(user_input, history=safe_history, stream=stream,
+                                  trace_id=tid, model=route.model)
         # Output guardrail on the non-streaming return; a streamed Iterator passes
         # through (post-hoc scanning of streamed tokens is a documented follow-up).
         return _scan_output(result, tid) if isinstance(result, str) else result
@@ -269,7 +294,8 @@ def run_agent(
     # -------------------------------
     if intent in ("ANSWER", "RESPOND_WITH_MEMORY"):
         log_event("pipeline_start", {"pipeline": "answer_with_memory"}, trace_id=tid)
-        result = answer_with_memory(user_id, user_input, history=safe_history, stream=stream, trace_id=tid)
+        result = answer_with_memory(user_id, user_input, history=safe_history, stream=stream,
+                                    trace_id=tid, model=route.model)
         return _scan_output(result, tid) if isinstance(result, str) else result
 
     # -------------------------------
@@ -432,12 +458,22 @@ Respond with a JSON object with exactly these keys:
     reason = data.get("reason", "")
     if not isinstance(reason, str):
         reason = ""
-    return {"intent": intent, "memory_candidate": memory_candidate, "reason": reason}
+    # low_confidence=False: this is a clean, validated classification. The routing
+    # layer (Step 28) reads this flag; a confident intent routes by difficulty.
+    return {"intent": intent, "memory_candidate": memory_candidate, "reason": reason,
+            "low_confidence": False}
 
 
 def _default_intent(user_input: str) -> dict:
-    """Safe fallback when intent classification fails or returns invalid data."""
-    return {"intent": "ANSWER", "memory_candidate": "", "reason": "Classification failed or invalid response."}
+    """Safe fallback when intent classification fails or returns invalid data.
+
+    low_confidence=True (Step 28): we did NOT actually understand this turn — the
+    classifier errored, returned empty, or gave an invalid intent, and we are
+    guessing ANSWER. The router treats this as a signal to escalate to the frontier
+    model rather than risk a wrong answer on the cheap one (uncertainty → route up).
+    """
+    return {"intent": "ANSWER", "memory_candidate": "", "reason": "Classification failed or invalid response.",
+            "low_confidence": True}
 
 
 # -------------------------------

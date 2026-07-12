@@ -188,6 +188,100 @@ def compute_cost_summary(log_path: str = None) -> dict:
     return {"by_operation": dict(sorted(ops.items())), "total": total}
 
 
+def compute_routing_summary(log_path: str = None) -> dict:
+    """Aggregate cost by model-routing tier + estimate the routing savings (Step 28).
+
+    Reads the same ``token_usage`` records as compute_cost_summary, but buckets
+    each call by TIER (small vs frontier) using the configured tier models, and
+    computes the headline routing metric:
+
+        savings = (what every call WOULD have cost at the frontier rate)
+                  − (what the routed run ACTUALLY cost)
+
+    That "all-frontier baseline" is the honest way the industry reports routing
+    wins: the naive design sends everything to the frontier model, and routing's
+    value is the money it saves versus that baseline. We reprice each call's real
+    token counts at the frontier model's rate to build it — no second run needed.
+
+    Honest notes:
+      - With the default config (frontier == small) every call buckets to "small"
+        and savings is 0.00 — correct: nothing was escalated, nothing was saved.
+      - A call whose model matches neither tier (e.g. an older log line, or the
+        embedding model) buckets to "other" and is excluded from the baseline.
+      - This is descriptive accounting of REAL traffic, not a benchmark claim.
+    """
+    from agentforge.config import MODEL_TIER_SMALL, MODEL_TIER_FRONTIER
+
+    path = log_path or AGENT_LOG_FILE
+    frontier_costs = MODEL_COSTS.get(MODEL_TIER_FRONTIER, MODEL_COSTS["gpt-4o-mini"])
+
+    tiers: dict[str, dict] = {
+        "small": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
+        "frontier": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
+        "other": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
+    }
+    actual_cost = 0.0
+    all_frontier_cost = 0.0
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("event") != "token_usage":
+                    continue
+                p = record.get("payload", {})
+                model = p.get("model", "")
+                prompt_tokens = p.get("prompt_tokens", 0)
+                completion_tokens = p.get("completion_tokens", 0)
+                cost = p.get("cost_usd", 0.0)
+
+                # Bucket by tier. Frontier is checked first so that when the two
+                # tiers are the SAME model (no-op default) the traffic reads as
+                # "small" — i.e. "nothing was escalated" — which is the honest label.
+                if model == MODEL_TIER_SMALL:
+                    tier = "small"
+                elif model == MODEL_TIER_FRONTIER:
+                    tier = "frontier"
+                else:
+                    tier = "other"
+
+                tiers[tier]["calls"] += 1
+                tiers[tier]["prompt_tokens"] += prompt_tokens
+                tiers[tier]["completion_tokens"] += completion_tokens
+                tiers[tier]["cost_usd"] += cost
+
+                # Baseline excludes "other" (embeddings / stale models) — we only
+                # compare LLM calls that routing actually chose a tier for.
+                if tier in ("small", "frontier"):
+                    actual_cost += cost
+                    all_frontier_cost += (prompt_tokens * frontier_costs["prompt"]
+                                          + completion_tokens * frontier_costs["completion"])
+    except FileNotFoundError:
+        pass
+
+    for v in tiers.values():
+        v["cost_usd"] = round(v["cost_usd"], 6)
+
+    savings = all_frontier_cost - actual_cost
+    savings_pct = (savings / all_frontier_cost * 100.0) if all_frontier_cost > 0 else 0.0
+
+    return {
+        "by_tier": tiers,
+        "small_model": MODEL_TIER_SMALL,
+        "frontier_model": MODEL_TIER_FRONTIER,
+        "actual_cost_usd": round(actual_cost, 6),
+        "all_frontier_cost_usd": round(all_frontier_cost, 6),
+        "savings_usd": round(savings, 6),
+        "savings_pct": round(savings_pct, 1),
+    }
+
+
 def compute_trace_cost(trace_id: str, log_path: str = None) -> dict:
     """Get the total cost and token breakdown for a single trace (one run_agent call).
 

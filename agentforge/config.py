@@ -144,6 +144,32 @@ AGENT_OUTPUT_GUARDRAIL_THRESHOLD = float(
     os.environ.get("AGENT_OUTPUT_GUARDRAIL_THRESHOLD", "0.4")
 )
 
+# --- MODEL ROUTING (Step 28) -------------------------------------------------
+# A routing layer that sends each request to a model sized to its difficulty:
+# the easy majority to a small/cheap model, the hard minority to a frontier
+# model. The difficulty estimator is FREE — we reuse the intent label that
+# classify_intent() already produces every turn (see agentforge/router.py).
+#
+# Two tiers. FRONTIER DEFAULTS TO THE SAME MODEL AS SMALL, so a fresh clone's
+# cost and behaviour are UNCHANGED until you deliberately set a real frontier
+# model (e.g. AGENT_MODEL_FRONTIER=gpt-4o). That is the backward-compat
+# guarantee: routing is live and logged, but a no-op cost-wise out of the box.
+# Small defaults to OPENAI_MODEL so the existing single-model default carries.
+AGENT_MODEL_ROUTING_ENABLED = _env_flag("AGENT_MODEL_ROUTING_ENABLED", True)
+MODEL_TIER_SMALL = os.environ.get("AGENT_MODEL_SMALL", OPENAI_MODEL)
+MODEL_TIER_FRONTIER = os.environ.get("AGENT_MODEL_FRONTIER", MODEL_TIER_SMALL)
+# Which intents are "hard" and escalate to the frontier tier. REACT is multi-step
+# reasoning/planning — the one intent the roadmap calls genuinely hard. Everything
+# else (single tool-calls, RAG answers, memory, plain answers) stays on small.
+# Comma-separated env override lets you widen the set (e.g. "REACT,DOCS_QA")
+# without a code change.
+ROUTING_HARD_INTENTS = frozenset(
+    i.strip().upper()
+    for i in os.environ.get("AGENT_ROUTING_HARD_INTENTS", "REACT").split(",")
+    if i.strip()
+)
+
+
 # MCP servers the agent connects to at runtime to discover and call tools.
 #
 # Follows the cross-vendor standard "mcpServers" shape (Claude Desktop / Cursor /

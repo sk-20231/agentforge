@@ -134,7 +134,7 @@ def prime_tool_catalog(force: bool = False) -> list:
 
 
 async def _run_tool_loop(messages: list, trace_id: str = None, approval_handler=None,
-                         user_id: str = "") -> str:
+                         user_id: str = "", model: str = None) -> str:
     """Open the shared MCP gateway, then run the single-pick ACT tool loop.
 
     ACT is MCP-only (Step 17c.1): every tool is discovered from the gateway; there
@@ -163,7 +163,7 @@ async def _run_tool_loop(messages: list, trace_id: str = None, approval_handler=
         # ---- 2. First LLM call: let the model pick a tool ----
         try:
             response = _get_client().chat.completions.create(
-                model=OPENAI_MODEL,
+                model=model or OPENAI_MODEL,
                 messages=messages,
                 tools=gw.openai_schemas,
                 tool_choice="required",
@@ -182,11 +182,12 @@ async def _run_tool_loop(messages: list, trace_id: str = None, approval_handler=
 
         # ---- 3 + 4. Dispatch the tool calls, then the follow-up LLM call ----
         return await _dispatch_and_followup(
-            gw, messages, message.tool_calls, [], 0, trace_id, user_id)
+            gw, messages, message.tool_calls, [], 0, trace_id, user_id, model=model)
 
 
 async def _dispatch_and_followup(gw, messages: list, tool_calls, tool_messages: list,
-                                 start_index: int, trace_id: str, user_id: str) -> str:
+                                 start_index: int, trace_id: str, user_id: str,
+                                 model: str = None) -> str:
     """Dispatch ``tool_calls[start_index:]`` and run the follow-up LLM call.
 
     Shared by the fresh ACT path (``start_index=0``) and the resume path (which
@@ -226,6 +227,9 @@ async def _dispatch_and_followup(gw, messages: list, tool_calls, tool_messages: 
                 # continuation so "allow for the rest of this turn" survives
                 # interrupt→resume and dies with the turn.
                 "granted": gw.granted,
+                # Step 28: freeze the routed model so the resumed follow-up call
+                # uses the same tier the turn was routed to, not the default.
+                "model": model,
             }
             raise
         tool_messages.append({
@@ -237,7 +241,7 @@ async def _dispatch_and_followup(gw, messages: list, tool_calls, tool_messages: 
     # ---- Follow-up LLM call: turn tool results into a final answer ----
     try:
         followup = _get_client().chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model or OPENAI_MODEL,
             messages=[
                 *messages,
                 {"role": "assistant", "tool_calls": tool_calls},
@@ -284,18 +288,24 @@ async def _resume_tool_loop_async(interrupt: ApprovalRequired, decision,
                            granted=cont.get("granted")) as gw:
         return await _dispatch_and_followup(
             gw, cont["messages"], cont["tool_calls"], cont["tool_messages"],
-            cont["pending_index"], cont["trace_id"], cont["user_id"])
+            cont["pending_index"], cont["trace_id"], cont["user_id"],
+            model=cont.get("model"))
 
 
 # -------------------- MAIN ENTRY --------------------
 
 def run_llm_with_tools(user_id: str, user_input: str, trace_id: str = None,
-                       approval_handler=None) -> str:
-    """Discover MCP tools at runtime and execute the (MCP-only) tool loop."""
+                       approval_handler=None, model: str = None) -> str:
+    """Discover MCP tools at runtime and execute the (MCP-only) tool loop.
+
+    ``model`` (Step 28) is the routed model for this turn; None → OPENAI_MODEL,
+    so pre-routing callers are unaffected. ACT is a routine intent (small tier),
+    but a low-confidence route can still hand the frontier model here.
+    """
     messages = build_messages(user_id, user_input)
     return run_interruptible(_run_tool_loop(messages, trace_id,
                                             approval_handler=approval_handler,
-                                            user_id=user_id))
+                                            user_id=user_id, model=model))
 
 
 def resume_tool_loop(interrupt: ApprovalRequired, decision,

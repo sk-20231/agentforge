@@ -13,8 +13,82 @@ from unittest.mock import patch, MagicMock
 
 from agentforge.logger import (
     generate_trace_id, log_event, Span, compute_latency_percentiles,
-    log_token_usage, compute_cost_summary, compute_trace_cost, MODEL_COSTS,
+    log_token_usage, compute_cost_summary, compute_trace_cost,
+    compute_routing_summary, MODEL_COSTS,
 )
+
+
+def _write_token_usage(path, records):
+    """Write minimal token_usage log lines. Each record: (model, p_tok, c_tok, cost)."""
+    with open(path, "w", encoding="utf-8") as f:
+        for model, p, c, cost in records:
+            f.write(json.dumps({
+                "event": "token_usage",
+                "payload": {"operation": "op", "model": model,
+                            "prompt_tokens": p, "completion_tokens": c,
+                            "total_tokens": p + c, "cost_usd": cost},
+            }) + "\n")
+
+
+class TestComputeRoutingSummary:
+
+    def test_per_tier_split_and_savings(self, tmp_path):
+        log_file = str(tmp_path / "routing.jsonl")
+        # 3 small (gpt-4o-mini) + 1 frontier (gpt-4o) call, same token shape each.
+        _write_token_usage(log_file, [
+            ("gpt-4o-mini", 1000, 500, 0.00045),
+            ("gpt-4o-mini", 1000, 500, 0.00045),
+            ("gpt-4o-mini", 1000, 500, 0.00045),
+            ("gpt-4o",      1000, 500, 0.0075),
+        ])
+        with patch("agentforge.config.MODEL_TIER_SMALL", "gpt-4o-mini"), \
+             patch("agentforge.config.MODEL_TIER_FRONTIER", "gpt-4o"):
+            s = compute_routing_summary(log_path=log_file)
+
+        assert s["by_tier"]["small"]["calls"] == 3
+        assert s["by_tier"]["frontier"]["calls"] == 1
+        assert s["actual_cost_usd"] == pytest.approx(0.00885)
+        # All 4 calls repriced at gpt-4o = 4 * 0.0075 = 0.03.
+        assert s["all_frontier_cost_usd"] == pytest.approx(0.03)
+        assert s["savings_usd"] == pytest.approx(0.02115)
+        assert s["savings_pct"] == pytest.approx(70.5, abs=0.1)
+
+    def test_noop_when_tiers_equal(self, tmp_path):
+        # Default config: frontier == small. Everything buckets small; zero savings.
+        log_file = str(tmp_path / "routing.jsonl")
+        _write_token_usage(log_file, [
+            ("gpt-4o-mini", 1000, 500, 0.00045),
+            ("gpt-4o-mini", 1000, 500, 0.00045),
+        ])
+        with patch("agentforge.config.MODEL_TIER_SMALL", "gpt-4o-mini"), \
+             patch("agentforge.config.MODEL_TIER_FRONTIER", "gpt-4o-mini"):
+            s = compute_routing_summary(log_path=log_file)
+        assert s["by_tier"]["small"]["calls"] == 2
+        assert s["by_tier"]["frontier"]["calls"] == 0
+        assert s["savings_usd"] == pytest.approx(0.0)
+        assert s["savings_pct"] == 0.0
+
+    def test_other_model_excluded_from_baseline(self, tmp_path):
+        # A model matching neither tier (e.g. embeddings) buckets to "other" and
+        # is left out of the savings baseline entirely.
+        log_file = str(tmp_path / "routing.jsonl")
+        _write_token_usage(log_file, [
+            ("gpt-4o-mini", 1000, 500, 0.00045),
+            ("text-embedding-3-small", 2000, 0, 0.00004),
+        ])
+        with patch("agentforge.config.MODEL_TIER_SMALL", "gpt-4o-mini"), \
+             patch("agentforge.config.MODEL_TIER_FRONTIER", "gpt-4o"):
+            s = compute_routing_summary(log_path=log_file)
+        assert s["by_tier"]["small"]["calls"] == 1
+        assert s["by_tier"]["other"]["calls"] == 1
+        # Baseline reprices only the 1 small call: 1000*2.5/1e6 + 500*10/1e6 = 0.0075.
+        assert s["all_frontier_cost_usd"] == pytest.approx(0.0075)
+
+    def test_missing_log_file_returns_zeros(self, tmp_path):
+        s = compute_routing_summary(log_path=str(tmp_path / "nope.jsonl"))
+        assert s["actual_cost_usd"] == 0.0
+        assert s["savings_usd"] == 0.0
+        assert s["by_tier"]["small"]["calls"] == 0
 
 
 class TestGenerateTraceId:

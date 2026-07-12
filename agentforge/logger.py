@@ -188,6 +188,32 @@ def compute_cost_summary(log_path: str = None) -> dict:
     return {"by_operation": dict(sorted(ops.items())), "total": total}
 
 
+def _tier_for_model(model: str, small: str, frontier: str) -> str:
+    """Bucket a logged model name into "small" / "frontier" / "other".
+
+    The OpenAI API returns a DATED model id (e.g. "gpt-4o-mini-2024-07-18"), which
+    never equals the unversioned tier name we configure ("gpt-4o-mini"). So we match
+    by prefix, and when both tiers prefix-match (e.g. "gpt-4o-mini-…" starts with BOTH
+    "gpt-4o" and "gpt-4o-mini") the LONGER — more specific — tier wins. Exact match is
+    checked first so that when the two tiers are the same model (no-op default) the
+    traffic reads as "small" (i.e. "nothing was escalated").
+    """
+    if not model:
+        return "other"
+    if model == small:
+        return "small"
+    if model == frontier:
+        return "frontier"
+    candidates = []
+    if model.startswith(small):
+        candidates.append(("small", len(small)))
+    if model.startswith(frontier):
+        candidates.append(("frontier", len(frontier)))
+    if candidates:
+        return max(candidates, key=lambda c: c[1])[0]
+    return "other"
+
+
 def compute_routing_summary(log_path: str = None) -> dict:
     """Aggregate cost by model-routing tier + estimate the routing savings (Step 28).
 
@@ -213,7 +239,17 @@ def compute_routing_summary(log_path: str = None) -> dict:
     from agentforge.config import MODEL_TIER_SMALL, MODEL_TIER_FRONTIER
 
     path = log_path or AGENT_LOG_FILE
+    # Price each tier at its CANONICAL rate. We deliberately do NOT trust the logged
+    # per-call cost_usd here: log_token_usage falls back to gpt-4o-mini pricing for
+    # any model id it doesn't recognise (and every id it sees is dated, so a distinct
+    # frontier tier would be mis-priced). Recomputing from token counts + tier makes
+    # this summary internally consistent regardless of that quirk.
+    small_costs = MODEL_COSTS.get(MODEL_TIER_SMALL, MODEL_COSTS["gpt-4o-mini"])
     frontier_costs = MODEL_COSTS.get(MODEL_TIER_FRONTIER, MODEL_COSTS["gpt-4o-mini"])
+    tier_costs = {"small": small_costs, "frontier": frontier_costs}
+
+    def _price(costs, p_tok, c_tok):
+        return p_tok * costs["prompt"] + c_tok * costs["completion"]
 
     tiers: dict[str, dict] = {
         "small": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
@@ -239,29 +275,23 @@ def compute_routing_summary(log_path: str = None) -> dict:
                 model = p.get("model", "")
                 prompt_tokens = p.get("prompt_tokens", 0)
                 completion_tokens = p.get("completion_tokens", 0)
-                cost = p.get("cost_usd", 0.0)
 
-                # Bucket by tier. Frontier is checked first so that when the two
-                # tiers are the SAME model (no-op default) the traffic reads as
-                # "small" — i.e. "nothing was escalated" — which is the honest label.
-                if model == MODEL_TIER_SMALL:
-                    tier = "small"
-                elif model == MODEL_TIER_FRONTIER:
-                    tier = "frontier"
-                else:
-                    tier = "other"
-
+                tier = _tier_for_model(model, MODEL_TIER_SMALL, MODEL_TIER_FRONTIER)
                 tiers[tier]["calls"] += 1
                 tiers[tier]["prompt_tokens"] += prompt_tokens
                 tiers[tier]["completion_tokens"] += completion_tokens
-                tiers[tier]["cost_usd"] += cost
 
-                # Baseline excludes "other" (embeddings / stale models) — we only
-                # compare LLM calls that routing actually chose a tier for.
-                if tier in ("small", "frontier"):
-                    actual_cost += cost
-                    all_frontier_cost += (prompt_tokens * frontier_costs["prompt"]
-                                          + completion_tokens * frontier_costs["completion"])
+                if tier == "other":
+                    # Embeddings / stale models: keep the logged cost for display,
+                    # but leave them OUT of the routing baseline (they weren't routed).
+                    tiers[tier]["cost_usd"] += p.get("cost_usd", 0.0)
+                    continue
+
+                # Tier-correct actual cost, plus the "everything at frontier" baseline.
+                actual = _price(tier_costs[tier], prompt_tokens, completion_tokens)
+                tiers[tier]["cost_usd"] += actual
+                actual_cost += actual
+                all_frontier_cost += _price(frontier_costs, prompt_tokens, completion_tokens)
     except FileNotFoundError:
         pass
 

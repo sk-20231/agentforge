@@ -90,6 +90,38 @@ class TestComputeRoutingSummary:
         assert s["savings_usd"] == 0.0
         assert s["by_tier"]["small"]["calls"] == 0
 
+    def test_dated_model_ids_bucket_to_tiers(self, tmp_path):
+        # Regression: the API logs DATED ids ("gpt-4o-mini-2024-07-18"), which never
+        # equal the unversioned tier name — an exact-match bucket sent everything to
+        # "other" and reported $0 savings. Prefix matching fixes it.
+        log_file = str(tmp_path / "routing.jsonl")
+        _write_token_usage(log_file, [
+            ("gpt-4o-mini-2024-07-18", 1000, 500, 0.0),
+            ("gpt-3.5-turbo-0125",     1000, 500, 0.0),
+        ])
+        with patch("agentforge.config.MODEL_TIER_SMALL", "gpt-4o-mini"), \
+             patch("agentforge.config.MODEL_TIER_FRONTIER", "gpt-3.5-turbo"):
+            s = compute_routing_summary(log_path=log_file)
+        assert s["by_tier"]["small"]["calls"] == 1
+        assert s["by_tier"]["frontier"]["calls"] == 1
+        assert s["by_tier"]["other"]["calls"] == 0
+
+    def test_prefix_ambiguity_longest_match_wins(self, tmp_path):
+        # gpt-4o is a prefix of gpt-4o-mini. A dated mini id must bucket to small
+        # (longest match), and a dated gpt-4o id to frontier.
+        log_file = str(tmp_path / "routing.jsonl")
+        _write_token_usage(log_file, [
+            ("gpt-4o-mini-2024-07-18", 1000, 500, 0.0),
+            ("gpt-4o-2024-11-20",      1000, 500, 0.0),
+        ])
+        with patch("agentforge.config.MODEL_TIER_SMALL", "gpt-4o-mini"), \
+             patch("agentforge.config.MODEL_TIER_FRONTIER", "gpt-4o"):
+            s = compute_routing_summary(log_path=log_file)
+        assert s["by_tier"]["small"]["calls"] == 1
+        assert s["by_tier"]["frontier"]["calls"] == 1
+        # Baseline reprices BOTH at gpt-4o; savings > 0 because the mini call is cheaper.
+        assert s["savings_usd"] > 0
+
 
 class TestGenerateTraceId:
 

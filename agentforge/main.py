@@ -219,7 +219,9 @@ def run_agent(
         "difficulty": route.difficulty,
         "reason": route.reason,
     }, trace_id=tid)
-    print(f"[Route] {route.tier} tier → {route.model} ({route.reason})")
+    # ASCII-only arrow: a non-cp1252 char here (e.g. "→") raises UnicodeEncodeError
+    # on a Windows console/redirected stream and would crash the whole turn.
+    print(f"[Route] {route.tier} tier -> {route.model} ({route.reason})")
 
     # -------------------------------
     # REMEMBER

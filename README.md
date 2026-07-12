@@ -198,7 +198,7 @@ agentforge/
 │   │   └── qa.py                 # RAG answer pipeline + citation guardrail
 │   └── reasoning/
 │       └── react_engine.py       # ReAct loop (think → act → observe → repeat)
-├── tests/                        # 393 tests (mostly mocked; live/contract tests skip without optional deps)
+├── tests/                        # ~400+ tests (mostly mocked; live/contract tests skip without optional deps)
 │   └── fixtures/
 │       └── test_corpus.json      # Pre-built corpus so CI evals run API-key-free
 ├── .github/workflows/            # CI/CD pipelines
@@ -299,7 +299,7 @@ Every message is classified into one of these intents:
 
 **Two separate GitHub Actions workflows**, because unit tests and eval runs have very different cost profiles:
 
-- **[`ci.yml`](.github/workflows/ci.yml)** — runs the unit-test suite (387 passing, 6 skipped — the optional PII / live-model / network-contract tests) on every push and PR. Free. No API key required. Takes ~20 seconds.
+- **[`ci.yml`](.github/workflows/ci.yml)** — runs the unit-test suite (~400+ tests; a handful of optional PII / live-model / network-contract tests skip without their extra deps) on every push and PR. Free. No API key required. Takes ~20 seconds.
 - **[`eval.yml`](.github/workflows/eval.yml)** — runs the full eval suite (Recall@K + faithfulness) on push to `main`. Uses a pre-built test corpus fixture so Recall@K costs nothing; only faithfulness scoring calls the API. Gates merges: Recall@K < 70% or faithfulness < 80% → build fails.
 
 ---

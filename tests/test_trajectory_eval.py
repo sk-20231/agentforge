@@ -16,6 +16,10 @@ from agentforge.evaluation import (
     score_tool_selection,
     score_loop_health,
     score_task_completion,
+    trace_to_eval_case,
+    append_eval_case,
+    review_draft_interactive,
+    _next_trajectory_id,
 )
 
 
@@ -217,6 +221,25 @@ class TestReconstructTrajectory:
         t = reconstruct_trajectory("x", log_path=str(tmp_path / "nofile.jsonl"))
         assert t["found"] is False
 
+    def test_recovers_task_from_react_start(self, tmp_path):
+        tid = "t1"
+        path = self._write_events(tmp_path, [
+            {"event": "react_start", "trace_id": tid,
+             "payload": {"user_input": "weather in Paris?", "max_steps": 5}},
+            self._step(tid, 1, "tool", "get_weather"),
+            {"event": "react_end", "trace_id": tid,
+             "payload": {"steps_taken": 2, "reply_length": 30}},
+        ])
+        t = reconstruct_trajectory(tid, log_path=path)
+        assert t["found"] is True
+        assert t["task"] == "weather in Paris?"
+
+    def test_task_defaults_empty_when_no_start(self, tmp_path):
+        # A trace with only steps (no react_start) still reconstructs; task is "".
+        path = self._write_events(tmp_path, [self._step("t2", 1, "tool", "get_weather")])
+        t = reconstruct_trajectory("t2", log_path=path)
+        assert t["task"] == ""
+
 
 # ---------- load_trajectory_dataset (validation) ----------
 
@@ -270,3 +293,148 @@ class TestLoadTrajectoryDataset:
         result = load_trajectory_dataset()
         assert len(result) >= 1
         assert all("task" in e for e in result)
+
+
+# ---------- Step 19 fast-follow: trace -> eval case ----------
+
+class TestNextTrajectoryId:
+    def test_empty_dataset_starts_at_001(self):
+        assert _next_trajectory_id([]) == "traj_001"
+
+    def test_increments_past_highest(self):
+        ds = [{"id": "traj_001"}, {"id": "traj_003"}, {"id": "traj_002"}]
+        assert _next_trajectory_id(ds) == "traj_004"
+
+    def test_ignores_non_matching_ids(self):
+        ds = [{"id": "custom_case"}, {"id": "traj_007"}]
+        assert _next_trajectory_id(ds) == "traj_008"
+
+
+class TestTraceToEvalCase:
+    def _write_log(self, tmp_path, records):
+        path = tmp_path / "logs.jsonl"
+        with open(path, "w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        return str(path)
+
+    def _trace(self, tid, task, tools):
+        records = [{"event": "react_start", "trace_id": tid,
+                    "payload": {"user_input": task, "max_steps": 5}}]
+        for i, name in enumerate(tools, start=1):
+            records.append({"event": "react_step", "trace_id": tid,
+                            "payload": {"step": i, "action_type": "tool",
+                                        "tool_name": name}})
+        records.append({"event": "react_end", "trace_id": tid,
+                        "payload": {"steps_taken": len(tools) + 1, "reply_length": 40}})
+        return records
+
+    def test_draft_recovers_task_and_observed_tools(self, tmp_path):
+        log = self._write_log(tmp_path, self._trace(
+            "tid", "weather in Paris and Paris news?", ["get_weather", "get_top_news"]))
+        draft = trace_to_eval_case(
+            "tid", log_path=log, dataset_path=str(tmp_path / "none.json"))
+        assert draft["task"] == "weather in Paris and Paris news?"
+        assert draft["expected_tools"] == ["get_weather", "get_top_news"]
+        assert draft["expected_outcome"] == ""          # human must fill
+        assert draft["id"] == "traj_001"                # empty dataset
+        assert draft["_source_trace_id"] == "tid"
+
+    def test_draft_dedupes_repeated_tools_in_order(self, tmp_path):
+        log = self._write_log(tmp_path, self._trace(
+            "tid", "t", ["get_weather", "get_weather", "get_top_news"]))
+        draft = trace_to_eval_case(
+            "tid", log_path=log, dataset_path=str(tmp_path / "none.json"))
+        assert draft["expected_tools"] == ["get_weather", "get_top_news"]
+
+    def test_missing_trace_returns_none(self, tmp_path):
+        log = self._write_log(tmp_path, self._trace("other", "t", ["get_weather"]))
+        assert trace_to_eval_case(
+            "absent", log_path=log, dataset_path=str(tmp_path / "none.json")) is None
+
+    def test_id_avoids_clash_with_existing_dataset(self, tmp_path):
+        ds = tmp_path / "traj.json"
+        ds.write_text(json.dumps([
+            {"id": "traj_009", "task": "x", "expected_tools": [],
+             "expected_outcome": "y"}]), encoding="utf-8")
+        log = self._write_log(tmp_path, self._trace("tid", "t", ["get_weather"]))
+        draft = trace_to_eval_case("tid", log_path=log, dataset_path=str(ds))
+        assert draft["id"] == "traj_010"
+
+
+class TestAppendEvalCase:
+    def _draft(self, **over):
+        d = {"id": "traj_050", "task": "do a thing",
+             "expected_tools": ["get_weather"], "expected_outcome": "a weather report",
+             "expected_substrings": [], "difficulty": "easy"}
+        d.update(over)
+        return d
+
+    def test_rejects_empty_outcome(self, tmp_path):
+        path = str(tmp_path / "traj.json")
+        with pytest.raises(ValueError, match="expected_outcome"):
+            append_eval_case(self._draft(expected_outcome="  "), path=path)
+
+    def test_rejects_missing_required_field(self, tmp_path):
+        d = self._draft()
+        del d["expected_tools"]
+        with pytest.raises(ValueError, match="required fields"):
+            append_eval_case(d, path=str(tmp_path / "traj.json"))
+
+    def test_rejects_duplicate_id(self, tmp_path):
+        path = tmp_path / "traj.json"
+        path.write_text(json.dumps([self._draft(id="traj_050")]), encoding="utf-8")
+        with pytest.raises(ValueError, match="duplicate id"):
+            append_eval_case(self._draft(id="traj_050"), path=str(path))
+
+    def test_appended_entry_is_loadable(self, tmp_path):
+        # Round-trip: append into a fresh file, then the shipped validator accepts it.
+        path = str(tmp_path / "traj.json")
+        append_eval_case(self._draft(id="traj_100"), path=path)
+        loaded = load_trajectory_dataset(path)
+        assert [e["id"] for e in loaded] == ["traj_100"]
+
+    def test_appends_to_existing_dataset(self, tmp_path):
+        path = tmp_path / "traj.json"
+        path.write_text(json.dumps([self._draft(id="traj_001")]), encoding="utf-8")
+        append_eval_case(self._draft(id="traj_002"), path=str(path))
+        assert [e["id"] for e in load_trajectory_dataset(str(path))] == \
+            ["traj_001", "traj_002"]
+
+
+class TestReviewDraftInteractive:
+    def _draft(self):
+        return {"id": "traj_001", "task": "weather in Paris?",
+                "expected_tools": ["get_weather"], "expected_outcome": "",
+                "expected_substrings": [], "difficulty": "unknown",
+                "_source_trace_id": "tid"}
+
+    def _feed(self, answers):
+        it = iter(answers)
+        return lambda _prompt: next(it)
+
+    def test_happy_path_fills_outcome_and_confirms(self):
+        # id, difficulty, tools, substrings, outcome, confirm
+        fn = self._feed(["", "medium", "", "", "a Paris weather report", "y"])
+        entry = review_draft_interactive(self._draft(), input_fn=fn)
+        assert entry is not None
+        assert entry["difficulty"] == "medium"
+        assert entry["expected_outcome"] == "a Paris weather report"
+        assert entry["expected_tools"] == ["get_weather"]   # kept the default
+
+    def test_reasks_until_outcome_non_empty(self):
+        # first outcome blank -> re-asked -> second non-empty
+        fn = self._feed(["", "", "", "", "", "finally an outcome", "y"])
+        entry = review_draft_interactive(self._draft(), input_fn=fn)
+        assert entry["expected_outcome"] == "finally an outcome"
+
+    def test_abort_when_not_confirmed(self):
+        fn = self._feed(["", "", "", "", "an outcome", "n"])
+        assert review_draft_interactive(self._draft(), input_fn=fn) is None
+
+    def test_edit_tools_are_parsed(self):
+        fn = self._feed(["", "hard", "get_weather, get_top_news", "Paris",
+                         "both weather and news", "y"])
+        entry = review_draft_interactive(self._draft(), input_fn=fn)
+        assert entry["expected_tools"] == ["get_weather", "get_top_news"]
+        assert entry["expected_substrings"] == ["Paris"]

@@ -238,6 +238,9 @@ def reconstruct_trajectory(trace_id: str, log_path: str = None) -> dict:
     change: the observability built earlier IS the eval input.
 
     The events it reads (emitted by ``reasoning/react_engine.py``):
+      - ``react_start`` → carries the turn's ``user_input`` (the task). Recovering
+        it here is what lets a trace become a self-describing eval case
+        (``evaluation.trace_to_eval_case``) without re-reading the log.
       - ``react_step``  → one per reasoning step; ``action_type`` + ``tool_name``.
         The ordered tool calls are the steps where ``action_type == "tool"``.
       - ``react_end``   → ``steps_taken`` and ``reply_length``; carries
@@ -248,6 +251,7 @@ def reconstruct_trajectory(trace_id: str, log_path: str = None) -> dict:
         {
           "trace_id": "...",
           "found": True,                 # False if no react_* events for this id
+          "task": "What is the weather in Paris?",  # from react_start; "" if absent
           "tools_called": ["get_weather", "get_top_news"],  # in call order
           "steps_taken": 3,
           "terminated_cleanly": True,    # False when the loop hit max_steps
@@ -255,6 +259,7 @@ def reconstruct_trajectory(trace_id: str, log_path: str = None) -> dict:
         }
     """
     path = log_path or AGENT_LOG_FILE
+    task = ""
     tools_called: list[str] = []
     steps_taken = 0
     terminated_cleanly = False
@@ -276,7 +281,10 @@ def reconstruct_trajectory(trace_id: str, log_path: str = None) -> dict:
                 event = record.get("event")
                 p = record.get("payload", {})
 
-                if event == "react_step":
+                if event == "react_start":
+                    found = True
+                    task = p.get("user_input", task)
+                elif event == "react_step":
                     found = True
                     if p.get("action_type") == "tool" and p.get("tool_name"):
                         tools_called.append(p["tool_name"])
@@ -293,6 +301,7 @@ def reconstruct_trajectory(trace_id: str, log_path: str = None) -> dict:
     return {
         "trace_id": trace_id,
         "found": found,
+        "task": task,
         "tools_called": tools_called,
         "steps_taken": steps_taken,
         "terminated_cleanly": terminated_cleanly,

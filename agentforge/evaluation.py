@@ -8,6 +8,7 @@ Step 10: faithfulness scoring (answer quality via LLM-as-judge).
 import json
 import logging
 import os
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -667,10 +668,226 @@ def run_trajectory_eval(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Step 19 fast-follow — failing trace → permanent regression case
+# ---------------------------------------------------------------------------
+#
+# ``run_trajectory_eval`` above goes forward: hand-written tasks -> run -> score.
+# This reverses the flow: a real (usually FAILING) trace becomes a permanent
+# eval case, so the dataset grows from production failures instead of guesses.
+#
+# The honest limitation is the design's safeguard: a trace records the task
+# (``react_start.user_input``) and the tools actually called, but NOT the final
+# answer text — only its length. So the success criterion (``expected_outcome``)
+# cannot be auto-derived; a human must state it. That mandatory human step is
+# exactly what stops a bad trace from silently poisoning the eval set.
+
+
+def _next_trajectory_id(dataset: list[dict]) -> str:
+    """Next unused ``traj_NNN`` id given the existing dataset entries.
+
+    Scans for ids of the form ``traj_<digits>`` and returns max+1 zero-padded to
+    three digits. Falls back to ``traj_001`` for an empty / unlabelled set. The
+    human can rename it during review — this is only a sensible default.
+    """
+    max_n = 0
+    for entry in dataset:
+        match = re.fullmatch(r"traj_(\d+)", str(entry.get("id", "")))
+        if match:
+            max_n = max(max_n, int(match.group(1)))
+    return f"traj_{max_n + 1:03d}"
+
+
+def trace_to_eval_case(
+    trace_id: str,
+    log_path: str = None,
+    dataset_path: str = None,
+) -> dict | None:
+    """Build a DRAFT trajectory eval entry from a real trace. Read-only + deterministic.
+
+    Reuses ``logger.reconstruct_trajectory`` (the same reader Step 19 scores) to
+    recover the task and the tools the agent actually called. Returns ``None`` if
+    the trace has no ReAct events — there is nothing to convert.
+
+    The draft is intentionally incomplete: ``expected_tools`` defaults to what was
+    *observed* (a starting point a human must confirm — on a failing trace the
+    observed tools may be exactly what was wrong), and ``expected_outcome`` is left
+    empty on purpose so the human is forced to state what success looks like
+    before ``append_eval_case`` will accept it.
+    """
+    from agentforge.logger import reconstruct_trajectory
+
+    traj = reconstruct_trajectory(trace_id, log_path=log_path)
+    if not traj.get("found"):
+        logger.warning(
+            "trace_to_eval_case: no ReAct trajectory for trace_id %s - nothing to convert",
+            trace_id,
+        )
+        return None
+
+    # De-duplicate the observed tools while preserving first-call order.
+    seen: set[str] = set()
+    observed_tools: list[str] = []
+    for tool in traj.get("tools_called", []):
+        if tool not in seen:
+            seen.add(tool)
+            observed_tools.append(tool)
+
+    # Read existing ids so the auto-generated id does not clash. A missing or
+    # malformed dataset just means "no ids yet" — never fatal at draft time.
+    try:
+        existing = load_trajectory_dataset(dataset_path)
+    except (FileNotFoundError, ValueError):
+        existing = []
+
+    draft = {
+        "id": _next_trajectory_id(existing),
+        "task": traj.get("task", ""),
+        "expected_tools": observed_tools,
+        "expected_outcome": "",          # human must fill — the poisoning guard
+        "expected_substrings": [],
+        "difficulty": "unknown",
+        "_source_trace_id": trace_id,     # provenance: which failure this came from
+    }
+    logger.info("Drafted eval case %s from trace %s (task=%r, tools=%s)",
+                draft["id"], trace_id, draft["task"], observed_tools)
+    return draft
+
+
+def append_eval_case(entry: dict, path: str = None) -> dict:
+    """Validate and append a reviewed trajectory eval case to the dataset JSON.
+
+    Guards against poisoning the eval set:
+      - ``expected_outcome`` must be non-empty — a human must state success.
+      - all ``TRAJECTORY_REQUIRED_FIELDS`` present; ``expected_tools`` a list.
+      - ``id`` must be unique — never silently overwrite an existing case.
+
+    Writes the whole array back pretty-printed (the dataset is hand-edited too).
+    Returns the appended entry.
+    """
+    path = os.path.abspath(path or DEFAULT_TRAJECTORY_PATH)
+
+    if not (entry.get("expected_outcome") or "").strip():
+        raise ValueError(
+            "expected_outcome must be non-empty — a human must state what success "
+            "looks like before a trace becomes an eval case (poisoning guard)."
+        )
+    missing = TRAJECTORY_REQUIRED_FIELDS - set(entry.keys())
+    if missing:
+        raise ValueError(f"entry missing required fields: {sorted(missing)}")
+    if not isinstance(entry["expected_tools"], list):
+        raise ValueError("expected_tools must be a list")
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            dataset = json.load(f)
+    except FileNotFoundError:
+        dataset = []
+    if not isinstance(dataset, list):
+        raise ValueError(f"dataset at {path} is not a JSON array")
+
+    if any(e.get("id") == entry["id"] for e in dataset):
+        raise ValueError(
+            f"duplicate id {entry['id']!r} — refusing to overwrite an existing eval case"
+        )
+
+    dataset.append(entry)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(dataset, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+    logger.info("Appended trajectory eval case %s to %s (now %d cases)",
+                entry["id"], path, len(dataset))
+    return entry
+
+
+def review_draft_interactive(draft: dict, input_fn=input) -> dict | None:
+    """Walk a human through confirming/editing a draft before it is persisted.
+
+    ``input_fn`` is injectable so tests can drive the review without real stdin.
+    Returns the reviewed entry, or ``None`` if the human aborts (EOF, or declines
+    the final confirmation). ``expected_outcome`` is required — the loop re-asks
+    until it is non-empty, which is the same poisoning guard ``append_eval_case``
+    enforces, surfaced at the point the human can fix it.
+    """
+    entry = dict(draft)
+
+    print("\nDraft eval case reconstructed from the trace:")
+    for key in ("id", "task", "expected_tools", "expected_outcome",
+                "expected_substrings", "difficulty", "_source_trace_id"):
+        print(f"  {key:20s}: {entry.get(key)!r}")
+    print("\nPress Enter to keep a default, or type a new value.\n")
+
+    def ask(prompt: str, default: str) -> str:
+        raw = input_fn(f"{prompt} [{default}]: ").strip()
+        return raw if raw else default
+
+    try:
+        entry["id"] = ask("id", entry["id"]) or entry["id"]
+        entry["difficulty"] = ask("difficulty (easy/medium/hard)", entry["difficulty"])
+
+        tools_raw = ask("expected_tools (comma-separated)",
+                        ", ".join(entry["expected_tools"]))
+        entry["expected_tools"] = [t.strip() for t in tools_raw.split(",") if t.strip()]
+
+        subs_raw = ask("expected_substrings (comma-separated, optional)",
+                       ", ".join(entry["expected_substrings"]))
+        entry["expected_substrings"] = [s.strip() for s in subs_raw.split(",") if s.strip()]
+
+        # expected_outcome is mandatory — re-ask until non-empty.
+        while not (entry.get("expected_outcome") or "").strip():
+            entry["expected_outcome"] = input_fn(
+                "expected_outcome (REQUIRED — what does success look like?): "
+            ).strip()
+            if not entry["expected_outcome"]:
+                print("  expected_outcome cannot be empty.")
+
+        confirm = input_fn(
+            f"Append case {entry['id']!r} to the dataset? [y/N]: "
+        ).strip().lower()
+    except EOFError:
+        print("\nAborted — no input; nothing written.")
+        return None
+
+    if confirm != "y":
+        print("Aborted — nothing written.")
+        return None
+    return entry
+
+
 if __name__ == "__main__":
     import sys
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    # --- Step 19 fast-follow: turn one real trace into a regression case ---
+    if "--from-trace" in sys.argv:
+        trace_id = None
+        for i, arg in enumerate(sys.argv):
+            if arg == "--from-trace" and i + 1 < len(sys.argv):
+                trace_id = sys.argv[i + 1]
+            elif arg.startswith("--from-trace="):
+                trace_id = arg.split("=", 1)[1]
+        if not trace_id or trace_id.startswith("--"):
+            print("usage: python -m agentforge.evaluation --from-trace <trace_id>")
+            sys.exit(2)
+
+        draft = trace_to_eval_case(trace_id)
+        if draft is None:
+            print(f"No ReAct trajectory found for trace_id {trace_id!r}. "
+                  f"Nothing to convert.")
+            sys.exit(1)
+
+        reviewed = review_draft_interactive(draft)
+        if reviewed is None:
+            sys.exit(1)
+        try:
+            append_eval_case(reviewed)
+        except ValueError as exc:
+            print(f"Not appended: {exc}")
+            sys.exit(1)
+        print(f"Appended {reviewed['id']} to the trajectory eval dataset.")
+        sys.exit(0)
 
     # --- Step 19: trajectory eval is a self-contained mode (no corpus needed) ---
     if "--trajectory" in sys.argv:

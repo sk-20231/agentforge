@@ -12,7 +12,12 @@ import streamlit as st
 from agentforge.approval import APPROVE_TURN, ApprovalRequest, ApprovalRequired
 from agentforge.main import resume_agent, run_agent
 from agentforge.rag.document_store import ingest_file, load_corpus
-from agentforge.logger import compute_cost_summary, compute_trace_cost, generate_trace_id
+from agentforge.logger import (
+    compute_cost_summary,
+    compute_routing_summary,
+    compute_trace_cost,
+    generate_trace_id,
+)
 from agentforge.tools import prime_tool_catalog
 
 logger = logging.getLogger(__name__)
@@ -259,6 +264,28 @@ with st.sidebar:
                     f"${stats['cost_usd']:.6f}, "
                     f"{stats['prompt_tokens'] + stats['completion_tokens']:,} tokens"
                 )
+
+    # Model routing (Step 28): per-tier split + savings vs an all-frontier baseline.
+    routing = compute_routing_summary()
+    small_m, frontier_m = routing["small_model"], routing["frontier_model"]
+    with st.expander("Model routing (tiers + savings)"):
+        if small_m == frontier_m:
+            st.caption(
+                f"Routing is a no-op: both tiers are `{small_m}`. Set "
+                "`AGENT_MODEL_FRONTIER` to a stronger model to route hard turns up "
+                "and see real savings."
+            )
+        else:
+            st.caption(f"small `{small_m}` · frontier `{frontier_m}`")
+            st.metric(
+                "Saved vs all-frontier",
+                f"${routing['savings_usd']:.4f}",
+                f"{routing['savings_pct']:.1f}%",
+            )
+        for tier in ("small", "frontier"):
+            t = routing["by_tier"][tier]
+            if t["calls"]:
+                st.text(f"{tier}: {t['calls']} calls, ${t['cost_usd']:.6f}")
 
     st.divider()
     if st.button("Clear chat"):

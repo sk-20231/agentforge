@@ -449,6 +449,18 @@ class TestReactResume:
                    if m.get("role") == "user")
         session.call_tool.assert_not_called()           # interrupted before dispatch
 
+    def test_interrupt_freezes_routed_model_in_continuation(self):
+        # Step 28: a frontier-routed REACT turn must RESUME on frontier, so the
+        # routed model is frozen into the continuation alongside the trace/grant.
+        session = _make_session_mock([_make_mcp_tool("fetch")])
+        with contextlib.ExitStack() as stack:
+            react_engine, _ = self._react_env(stack, session, [_REACT_TOOL_STEP])
+            with pytest.raises(ApprovalRequired) as excinfo:
+                react_engine.react_loop("u1", "plan a trip",
+                                        approval_handler=_raising_handler,
+                                        model="frontier-model")
+        assert excinfo.value.continuation["model"] == "frontier-model"
+
     def test_resume_approve_dispatches_stored_call_and_finishes(self):
         session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE BODY")
         with contextlib.ExitStack() as stack:
@@ -731,6 +743,21 @@ class TestActResume:
 
         session.call_tool.assert_called_once_with("fetch", {"url": "http://8.8.8.8/p"})
         assert json.loads(result)["reply"] == "Here is the page summary"
+
+    def test_act_interrupt_freezes_routed_model(self):
+        # Step 28 (symmetric to the REACT case): the routed model is frozen in the
+        # ACT continuation so the resumed follow-up call stays on the routed tier.
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        tool_call = _make_openai_tool_call("fetch", json.dumps({"url": "http://8.8.8.8/p"}))
+        with contextlib.ExitStack() as stack:
+            tools_pkg, _ = self._act_env(stack, session, [
+                _llm_response(None, tool_calls=[tool_call]),
+            ])
+            with pytest.raises(ApprovalRequired) as excinfo:
+                tools_pkg.run_llm_with_tools("u1", "fetch the page",
+                                             approval_handler=_raising_handler,
+                                             model="frontier-model")
+        assert excinfo.value.continuation["model"] == "frontier-model"
 
     def test_act_resume_deny_still_answers(self):
         session = _make_session_mock([_make_mcp_tool("fetch")])

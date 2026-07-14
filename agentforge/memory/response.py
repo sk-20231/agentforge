@@ -26,6 +26,7 @@ def answer_with_memory(
     history: list[dict] = None,
     stream: bool = False,
     trace_id: str = None,
+    model: str = None,
 ) -> str | Iterator[str]:
     """Answer a question using the user's stored memory and conversation history.
 
@@ -36,7 +37,11 @@ def answer_with_memory(
         stream:   If True, returns an Iterator[str] that yields tokens one by one
                   (stream=True on the OpenAI call). If False (default), returns
                   the full response as a str — fully backward compatible.
+        model:    Routed model (Step 28). None → OPENAI_MODEL. ANSWER is a routine
+                  intent (small tier), but a low-confidence route can still pass the
+                  frontier model here, so we honour whatever run_agent selected.
     """
+    model = model or OPENAI_MODEL
     try:
         memory = load_memory(user_id)
     except Exception:
@@ -67,11 +72,11 @@ def answer_with_memory(
 
     if stream:
         logger.debug("answer_with_memory: starting streaming response for user=%s.", user_id)
-        return _stream_tokens(messages, trace_id=trace_id)
+        return _stream_tokens(messages, trace_id=trace_id, model=model)
 
     try:
         response = _get_client().chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model,
             messages=messages,
         )
         log_token_usage(response, "memory_answer", trace_id=trace_id)
@@ -80,15 +85,17 @@ def answer_with_memory(
         return "I ran into an error answering your question. Please try again."
 
 
-def _stream_tokens(messages: list[dict], trace_id: str = None) -> Iterator[str]:
+def _stream_tokens(messages: list[dict], trace_id: str = None,
+                   model: str = None) -> Iterator[str]:
     """Internal generator: streams tokens from the OpenAI API.
 
     Separated from answer_with_memory so the error-handling is clean:
     if the API call itself fails, the exception propagates to the CLI which
     catches it; if a mid-stream chunk is malformed, we skip it and continue.
+    ``model`` (Step 28) is the routed model; None → OPENAI_MODEL.
     """
     response = _get_client().chat.completions.create(
-        model=OPENAI_MODEL,
+        model=model or OPENAI_MODEL,
         messages=messages,
         stream=True,
         stream_options={"include_usage": True},

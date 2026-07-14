@@ -39,7 +39,8 @@ logger = logging.getLogger(__name__)
 
 
 def react_loop(user_id: str, user_input: str, max_steps: int = 5,
-               approval_handler=None, trace_id: str = None) -> str:
+               approval_handler=None, trace_id: str = None,
+               model: str = None) -> str:
     """Core ReAct reasoning loop (think → act → observe → repeat).
 
     Public entry point. Existing positional args are unchanged, so callers
@@ -51,10 +52,15 @@ def react_loop(user_id: str, user_input: str, max_steps: int = 5,
     every log record this module emits — token usage, react_* events, the
     gateway's security audit entries — is orphaned from its turn, so per-trace
     cost aggregation undercounts REACT turns.
+    ``model`` is the routed model for this turn (Step 28). None → OPENAI_MODEL,
+    so every pre-routing caller is unaffected. REACT is the "hard" intent, so
+    run_agent routes it to the frontier tier; the step-level reasoning calls use
+    it. The observation-compressor is a routine sub-task and stays on the small
+    model deliberately (see _maybe_compress_observation).
     """
     return run_interruptible(_react_loop_async(user_id, user_input, max_steps,
                                                approval_handler=approval_handler,
-                                               trace_id=trace_id))
+                                               trace_id=trace_id, model=model))
 
 
 def resume_react_loop(interrupt: ApprovalRequired, decision,
@@ -75,7 +81,8 @@ def resume_react_loop(interrupt: ApprovalRequired, decision,
 
 
 async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5,
-                            approval_handler=None, trace_id: str = None) -> str:
+                            approval_handler=None, trace_id: str = None,
+                            model: str = None) -> str:
     """Async ReAct loop with tools served over MCP (Step 17c.2).
 
     What changed from the pre-MCP loop:
@@ -108,7 +115,7 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5,
                   trace_id=trace_id)
 
         return await _react_steps(gw, messages, user_id, 0, max_steps,
-                                  trace_id=trace_id)
+                                  trace_id=trace_id, model=model)
 
 
 async def _react_resume_async(interrupt: ApprovalRequired, decision,
@@ -154,7 +161,7 @@ async def _react_resume_async(interrupt: ApprovalRequired, decision,
         })
         return await _react_steps(gw, messages, cont["user_id"],
                                   cont["step"] + 1, cont["max_steps"],
-                                  trace_id=trace_id)
+                                  trace_id=trace_id, model=cont.get("model"))
 
 
 def _user_question(messages: list) -> str:
@@ -227,17 +234,19 @@ def _maybe_compress_observation(observation: str, messages: list, gw,
 
 async def _react_steps(gw, messages: list, user_id: str,
                        start_step: int, max_steps: int,
-                       trace_id: str = None) -> str:
+                       trace_id: str = None, model: str = None) -> str:
     """The think → act → observe loop body, shared by fresh runs and resumes.
 
     ``start_step`` is 0 for a fresh turn; a resume passes the interrupted
     step + 1 (the interrupted step itself is finished by the resume path
-    before re-entering here).
+    before re-entering here). ``model`` (Step 28) is the routed model for the
+    per-step reasoning calls; None → OPENAI_MODEL.
     """
+    model = model or OPENAI_MODEL
     for step in range(start_step, max_steps):
             try:
                 response = _get_client().chat.completions.create(
-                    model=OPENAI_MODEL,
+                    model=model,
                     messages=messages,
                     # Constrained decoding: same as classify_intent (Step 6).
                     # The ReAct schema is more complex (nested action object,
@@ -317,6 +326,10 @@ async def _react_steps(gw, messages: list, user_id: str,
                         # so "allow for the rest of this turn" survives every
                         # interrupt and dies with the turn (no cleanup code).
                         "granted": gw.granted,
+                        # Step 28: freeze the routed model too, so a frontier-
+                        # routed turn RESUMES on frontier — not silently on the
+                        # small default. Same principle as freezing the trace ID.
+                        "model": model,
                     }
                     raise
 

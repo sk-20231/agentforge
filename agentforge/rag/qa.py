@@ -102,6 +102,7 @@ def _stream_rag_tokens(
     valid_ids: set[str],
     user_input: str,
     trace_id: str = None,
+    model: str = None,
 ) -> Iterator[str]:
     """Stream RAG generation tokens while buffering for the citation guardrail.
 
@@ -120,7 +121,7 @@ def _stream_rag_tokens(
       generator isolated makes error handling clean and the main function readable.
     """
     response = _get_client().chat.completions.create(
-        model=OPENAI_MODEL,
+        model=model or OPENAI_MODEL,
         messages=messages,
         stream=True,
         stream_options={"include_usage": True},
@@ -170,6 +171,7 @@ def answer_from_docs(
     history: list[dict] = None,
     stream: bool = False,
     trace_id: str = None,
+    model: str = None,
 ) -> str | Iterator[str]:
     """
     Full RAG pipeline: rewrite -> retrieve -> prompt -> generate -> guardrail.
@@ -231,12 +233,13 @@ def answer_from_docs(
     #     guardrail happen lazily as the caller iterates.
     if stream:
         logger.debug("answer_from_docs: returning streaming generator for query=%r.", user_input)
-        return _stream_rag_tokens(messages, valid_ids, user_input, trace_id=trace_id)
+        return _stream_rag_tokens(messages, valid_ids, user_input, trace_id=trace_id,
+                                  model=model)
 
     # 4b. Non-streaming path (default) — wait for full response, then guardrail.
     with Span("docs_qa_generate", trace_id=trace_id) as s:
         response = _get_client().chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model or OPENAI_MODEL,
             messages=messages,
         )
         log_token_usage(response, "docs_qa_generate", trace_id=trace_id)

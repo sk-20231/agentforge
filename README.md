@@ -5,6 +5,7 @@
 ![CI](https://github.com/sk-20231/agentforge/actions/workflows/ci.yml/badge.svg)
 ![Eval Gate](https://github.com/sk-20231/agentforge/actions/workflows/eval.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
+![Tests](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/sk-20231/agentforge/badges/tests.json)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---

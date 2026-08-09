@@ -438,3 +438,95 @@ class TestReviewDraftInteractive:
         entry = review_draft_interactive(self._draft(), input_fn=fn)
         assert entry["expected_tools"] == ["get_weather", "get_top_news"]
         assert entry["expected_substrings"] == ["Paris"]
+
+
+# ------------- reconstruct_trajectory: tool ARGS (Step 21b.1) -------------
+
+class TestReconstructTrajectoryToolCalls:
+    """``tool_calls`` carries name AND arguments; ``tools_called`` stays as the
+    names-only view, DERIVED from it so the two can never disagree."""
+
+    def _write_events(self, tmp_path, records):
+        path = tmp_path / "logs.jsonl"
+        with open(path, "w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        return str(path)
+
+    def _tool_step(self, tid, step, tool_name, tool_input=None, **extra):
+        payload = {"step": step, "action_type": "tool", "tool_name": tool_name}
+        if tool_input is not None:
+            payload["tool_input"] = tool_input
+        payload.update(extra)
+        return {"event": "react_step", "trace_id": tid, "payload": payload}
+
+    def test_tool_calls_carry_name_and_args_in_order(self, tmp_path):
+        tid = "args1"
+        path = self._write_events(tmp_path, [
+            self._tool_step(tid, 1, "get_weather", {"city": "Paris"}),
+            self._tool_step(tid, 2, "get_top_news", {"topic": "Paris"}),
+            {"event": "react_end", "trace_id": tid,
+             "payload": {"steps_taken": 3, "reply_length": 20}},
+        ])
+        t = reconstruct_trajectory(tid, log_path=path)
+        assert t["tool_calls"] == [
+            {"name": "get_weather", "args": {"city": "Paris"}},
+            {"name": "get_top_news", "args": {"topic": "Paris"}},
+        ]
+
+    def test_tools_called_is_derived_from_tool_calls(self, tmp_path):
+        tid = "args2"
+        path = self._write_events(tmp_path, [
+            self._tool_step(tid, 1, "get_weather", {"city": "Paris"}),
+            self._tool_step(tid, 2, "get_top_news", {"topic": "Paris"}),
+        ])
+        t = reconstruct_trajectory(tid, log_path=path)
+        assert t["tools_called"] == [c["name"] for c in t["tool_calls"]]
+        assert t["tools_called"] == ["get_weather", "get_top_news"]
+
+    def test_old_trace_without_tool_input_still_reconstructs(self, tmp_path):
+        """Backward compat: traces written before 21b.1 have no `tool_input`.
+        They must still read back, just without argument detail."""
+        tid = "legacy"
+        path = self._write_events(tmp_path, [
+            self._tool_step(tid, 1, "get_weather"),   # no tool_input key
+            {"event": "react_end", "trace_id": tid,
+             "payload": {"steps_taken": 2, "reply_length": 9}},
+        ])
+        t = reconstruct_trajectory(tid, log_path=path)
+        assert t["tools_called"] == ["get_weather"]
+        assert t["tool_calls"] == [{"name": "get_weather", "args": {}}]
+
+    def test_no_tool_steps_gives_empty_tool_calls(self, tmp_path):
+        tid = "notools"
+        path = self._write_events(tmp_path, [
+            {"event": "react_step", "trace_id": tid,
+             "payload": {"step": 1, "action_type": "final", "tool_name": None}},
+            {"event": "react_end", "trace_id": tid,
+             "payload": {"steps_taken": 1, "reply_length": 5}},
+        ])
+        t = reconstruct_trajectory(tid, log_path=path)
+        assert t["tool_calls"] == []
+        assert t["tools_called"] == []
+
+    def test_repeated_tool_keeps_both_calls_with_their_own_args(self, tmp_path):
+        """The distinguishing case for arg logging: same tool, different args.
+        Names alone make these two steps look identical."""
+        tid = "repeat"
+        path = self._write_events(tmp_path, [
+            self._tool_step(tid, 1, "get_weather", {"city": "Paris"}),
+            self._tool_step(tid, 2, "get_weather", {"city": "Berlin"}),
+        ])
+        t = reconstruct_trajectory(tid, log_path=path)
+        assert t["tools_called"] == ["get_weather", "get_weather"]
+        assert [c["args"]["city"] for c in t["tool_calls"]] == ["Paris", "Berlin"]
+
+    def test_truncation_flag_does_not_leak_into_tool_calls(self, tmp_path):
+        """The flags are step-level metadata, not part of the call record."""
+        tid = "trunc"
+        path = self._write_events(tmp_path, [
+            self._tool_step(tid, 1, "get_weather", {"city": "Par...[truncated]"},
+                            tool_input_truncated=True),
+        ])
+        t = reconstruct_trajectory(tid, log_path=path)
+        assert set(t["tool_calls"][0].keys()) == {"name", "args"}

@@ -365,8 +365,9 @@ def reconstruct_trajectory(trace_id: str, log_path: str = None) -> dict:
       - ``react_start`` → carries the turn's ``user_input`` (the task). Recovering
         it here is what lets a trace become a self-describing eval case
         (``evaluation.trace_to_eval_case``) without re-reading the log.
-      - ``react_step``  → one per reasoning step; ``action_type`` + ``tool_name``.
-        The ordered tool calls are the steps where ``action_type == "tool"``.
+      - ``react_step``  → one per reasoning step; ``action_type`` + ``tool_name``,
+        plus ``tool_input`` (the guardrail-scrubbed ARGUMENTS, Step 21b.1). The
+        ordered tool calls are the steps where ``action_type == "tool"``.
       - ``react_end``   → ``steps_taken`` and ``reply_length``; carries
         ``stopped == "max_steps"`` ONLY when the loop hit its ceiling without
         finishing (that is the loop-health signal).
@@ -376,15 +377,31 @@ def reconstruct_trajectory(trace_id: str, log_path: str = None) -> dict:
           "trace_id": "...",
           "found": True,                 # False if no react_* events for this id
           "task": "What is the weather in Paris?",  # from react_start; "" if absent
-          "tools_called": ["get_weather", "get_top_news"],  # in call order
+          "tool_calls": [                # in call order — name AND arguments
+            {"name": "get_weather",  "args": {"city": "Paris"}},
+            {"name": "get_top_news", "args": {"topic": "Paris"}},
+          ],
+          "tools_called": ["get_weather", "get_top_news"],  # names only, in order
           "steps_taken": 3,
           "terminated_cleanly": True,    # False when the loop hit max_steps
           "final_reply_length": 42,      # 0 when it never produced a final reply
         }
+
+    ``tools_called`` and ``tool_calls`` (Step 21b.1) hold the same calls at two
+    detail levels. Read them this way: *tools_called* = which tools, *tool_calls*
+    = which tools **and how they were called**. ``tool_calls`` matches the field
+    name the OpenAI API uses for the same {name, arguments} idea. ``tools_called``
+    is DERIVED from ``tool_calls`` rather than gathered separately, so the two can
+    never disagree; it stays because ``score_tool_selection`` only wants names and
+    because removing it would break every existing caller.
+
+    Traces written BEFORE 21b.1 carry no ``tool_input``, so their ``args`` read
+    back as ``{}`` — an older log still reconstructs, just without argument
+    detail.
     """
     path = log_path or AGENT_LOG_FILE
     task = ""
-    tools_called: list[str] = []
+    tool_calls: list[dict] = []
     steps_taken = 0
     terminated_cleanly = False
     final_reply_length = 0
@@ -411,7 +428,13 @@ def reconstruct_trajectory(trace_id: str, log_path: str = None) -> dict:
                 elif event == "react_step":
                     found = True
                     if p.get("action_type") == "tool" and p.get("tool_name"):
-                        tools_called.append(p["tool_name"])
+                        # `tool_input` is absent on pre-21b.1 traces and when
+                        # argument logging is switched off — default to {} so an
+                        # older log reconstructs with the same shape.
+                        tool_calls.append({
+                            "name": p["tool_name"],
+                            "args": p.get("tool_input", {}),
+                        })
                 elif event == "react_end":
                     found = True
                     steps_taken = p.get("steps_taken", steps_taken)
@@ -426,7 +449,9 @@ def reconstruct_trajectory(trace_id: str, log_path: str = None) -> dict:
         "trace_id": trace_id,
         "found": found,
         "task": task,
-        "tools_called": tools_called,
+        "tool_calls": tool_calls,
+        # Derived, never gathered separately — see the docstring.
+        "tools_called": [c["name"] for c in tool_calls],
         "steps_taken": steps_taken,
         "terminated_cleanly": terminated_cleanly,
         "final_reply_length": final_reply_length,

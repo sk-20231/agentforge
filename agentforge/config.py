@@ -44,6 +44,14 @@ COMPACTION_SUMMARY_MAX_TOKENS = int(os.environ.get("AGENT_COMPACTION_SUMMARY_MAX
 # observations pass through untouched; 0 disables compression entirely.
 REACT_OBS_COMPRESS_THRESHOLD = int(os.environ.get("REACT_OBS_COMPRESS_THRESHOLD", "2500"))
 
+# Trace completeness (Step 21b.1): per-string cap, in characters, on the tool
+# ARGUMENTS recorded in each `react_step` event. Args are normally tiny ("Paris"),
+# but a model can emit an arbitrarily long one, and this goes to an append-only
+# JSONL file that the trajectory reader parses line by line — so it is bounded.
+# A capped string is truncated and the step is flagged `tool_input_truncated`;
+# 0 disables argument logging entirely (back to name-only traces).
+REACT_TRACE_ARG_MAX_CHARS = int(os.environ.get("REACT_TRACE_ARG_MAX_CHARS", "500"))
+
 # Content guardrail (Step 17e gap E) — a meaning-reading injection/jailbreak
 # classifier (a local HuggingFace model, run directly via `transformers`; ProtectAI
 # DeBERTa by default, Meta Prompt Guard 2 optional) layered ON TOP of the gateway's

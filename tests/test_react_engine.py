@@ -619,3 +619,131 @@ class TestReactTraceId:
         run_agent("u1", "s1", "plan my trip", trace_id=self.TRACE)
 
         assert mock_react.call_args.kwargs.get("trace_id") == self.TRACE
+
+
+# ------------------ trace completeness: tool ARGS (Step 21b.1) ------------------
+
+class TestReactStepLogsToolArgs:
+    """The `react_step` event must record WHAT a tool was called with, not just
+    which tool ran — otherwise a trajectory cannot tell a wrong argument from a
+    bad tool (issue #36). Values are guardrail-scrubbed before they are logged.
+    """
+
+    def _tool_then_final(self, mock_client, tool_input):
+        tool_step = json.dumps({
+            "thought": "look it up",
+            "action": {"type": "tool", "tool_name": "get_weather",
+                       "tool_input": tool_input},
+            "reply": "",
+        })
+        final_step = json.dumps({
+            "thought": "answer", "action": {"type": "final"}, "reply": "done",
+        })
+        msg1, msg2 = MagicMock(), MagicMock()
+        msg1.content, msg2.content = tool_step, final_step
+        mock_client.chat.completions.create.side_effect = [
+            MagicMock(choices=[MagicMock(message=msg1)]),
+            MagicMock(choices=[MagicMock(message=msg2)]),
+        ]
+
+    def _step_payloads(self, mock_log):
+        return [c.args[1] for c in mock_log.call_args_list
+                if c.args and c.args[0] == "react_step"]
+
+    def _run(self, mock_client, tool_input, mock_log):
+        self._tool_then_final(mock_client, tool_input)
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(_FakeGateway()):
+            react_loop("u1", "weather?", max_steps=3, trace_id="T1")
+        return self._step_payloads(mock_log)
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_tool_step_records_the_arguments(self, mock_client, mock_mem, mock_log):
+        steps = self._run(mock_client, {"city": "Paris"}, mock_log)
+        assert steps[0]["tool_name"] == "get_weather"
+        assert steps[0]["tool_input"] == {"city": "Paris"}
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_final_step_has_no_tool_input_field(self, mock_client, mock_mem, mock_log):
+        """A final step has no arguments — the key must be absent, not empty."""
+        steps = self._run(mock_client, {"city": "Paris"}, mock_log)
+        assert steps[1]["action_type"] == "final"
+        assert "tool_input" not in steps[1]
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_pii_in_arguments_is_redacted_before_logging(self, mock_client,
+                                                         mock_mem, mock_log):
+        steps = self._run(mock_client, {"to": "ceo@corp.com"}, mock_log)
+        assert "ceo@corp.com" not in json.dumps(steps[0])
+        assert steps[0]["tool_input"] == {"to": "[REDACTED_EMAIL]"}
+        assert steps[0]["tool_input_redacted"] == ["EMAIL"]
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_clean_arguments_carry_no_redaction_flags(self, mock_client,
+                                                      mock_mem, mock_log):
+        steps = self._run(mock_client, {"city": "Paris"}, mock_log)
+        assert "tool_input_redacted" not in steps[0]
+        assert "tool_input_truncated" not in steps[0]
+
+    @patch("agentforge.reasoning.react_engine.REACT_TRACE_ARG_MAX_CHARS", 10)
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_oversized_arguments_are_capped_and_flagged(self, mock_client,
+                                                        mock_mem, mock_log):
+        steps = self._run(mock_client, {"q": "y" * 200}, mock_log)
+        assert steps[0]["tool_input_truncated"] is True
+        assert len(steps[0]["tool_input"]["q"]) < 200
+
+    @patch("agentforge.reasoning.react_engine.REACT_TRACE_ARG_MAX_CHARS", 0)
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_zero_cap_switches_argument_logging_off(self, mock_client,
+                                                    mock_mem, mock_log):
+        steps = self._run(mock_client, {"city": "Paris"}, mock_log)
+        assert "tool_input" not in steps[0]
+        assert steps[0]["tool_name"] == "get_weather"  # name-only, as before
+
+    @patch("agentforge.reasoning.react_engine.scan_structured",
+           side_effect=RuntimeError("scrub exploded"))
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_scrub_failure_degrades_to_key_names_and_never_kills_the_turn(
+            self, mock_client, mock_mem, mock_log, mock_scan):
+        """A trace field must not be able to abort a reasoning turn. On failure
+        it falls back to the audit log's key-names-only shape."""
+        self._tool_then_final(mock_client, {"to": "ceo@corp.com", "city": "Paris"})
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(_FakeGateway()):
+            reply = react_loop("u1", "weather?", max_steps=3, trace_id="T1")
+
+        assert reply == "done"  # the turn completed
+        step = self._step_payloads(mock_log)[0]
+        assert step["tool_input_scan_failed"] is True
+        assert step["tool_input_keys"] == ["city", "to"]
+        assert "ceo@corp.com" not in json.dumps(step)
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_logged_arguments_match_what_was_dispatched(self, mock_client,
+                                                        mock_mem, mock_log):
+        """The trace is only evidence if it records the call that really ran."""
+        self._tool_then_final(mock_client, {"city": "Paris"})
+        from agentforge.reasoning.react_engine import react_loop
+        gw = _FakeGateway()
+        with _patch_gateway(gw):
+            react_loop("u1", "weather?", max_steps=3, trace_id="T1")
+
+        assert gw.calls == [("get_weather", {"city": "Paris"})]
+        assert self._step_payloads(mock_log)[0]["tool_input"] == {"city": "Paris"}

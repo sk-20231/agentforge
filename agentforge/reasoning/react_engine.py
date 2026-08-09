@@ -13,6 +13,7 @@ from agentforge.config import (
     OPENAI_MODEL,
     OPENAI_BASE_URL,
     REACT_OBS_COMPRESS_THRESHOLD,
+    REACT_TRACE_ARG_MAX_CHARS,
 )
 from agentforge.prompts import (
     build_prompt,
@@ -24,6 +25,7 @@ from agentforge.prompts import (
 )
 from agentforge.mcp_client import mcp_gateway
 from agentforge.memory.semantic import get_relevant_memories, store_memory
+from agentforge.output_guardrail import scan_structured
 from agentforge.safety import wrap_untrusted
 from agentforge.logger import log_event, log_token_usage
 
@@ -232,6 +234,53 @@ def _maybe_compress_observation(observation: str, messages: list, gw,
                           nonce=gw.nonce)
 
 
+def _trace_tool_input(tool_input, trace_id: str = None) -> dict:
+    """The `react_step` fields describing a tool step's ARGUMENTS (Step 21b.1).
+
+    WHY: before this, a trace recorded WHICH tool ran but not WHAT it was called
+    with. That is enough to score tool *selection* and no more — a trajectory
+    could not tell "right tool, wrong argument" from "right tool, bad source"
+    (exactly the ambiguity in issue #36). Logging the arguments makes the trace
+    complete enough to diagnose tool-call QUALITY, which is what multi-agent
+    failure attribution (Step 21b) needs.
+
+    The arguments are recorded at FULL VALUE, guardrail-scrubbed — deliberately
+    different from the gateway's security audit log, which records key names
+    only. Different logs, different jobs: the audit log answers "what was
+    attempted" for a reviewer and must minimise what it retains; the trace is a
+    debugging/eval artifact where the value IS the evidence. Both are local,
+    gitignored files. The scrub is the regex floor (see ``scan_structured``), so
+    a per-step model forward pass is never added to the loop.
+
+    Never raises: a trace field must not be able to kill a turn. If the scan
+    fails it degrades to the audit log's key-names-only shape and flags itself,
+    which is strictly less information but never a wrong value.
+    """
+    if REACT_TRACE_ARG_MAX_CHARS <= 0:  # argument logging switched off
+        return {}
+
+    args = {} if tool_input is None else tool_input
+    try:
+        scanned = scan_structured(args, max_chars=REACT_TRACE_ARG_MAX_CHARS)
+    except Exception as e:
+        logger.warning("react: tool-argument scrub failed, logging key names "
+                       "only: %s", e)
+        log_event("react_trace_args_failed", {"error": str(e)}, trace_id=trace_id)
+        return {
+            "tool_input_keys": sorted(args.keys()) if isinstance(args, dict) else [],
+            "tool_input_scan_failed": True,
+        }
+
+    fields = {"tool_input": scanned.value}
+    # Categories only, never values — same rule as the reply guardrail. Present
+    # only when something was redacted, so a clean step stays visually clean.
+    if scanned.types:
+        fields["tool_input_redacted"] = scanned.types
+    if scanned.truncated:
+        fields["tool_input_truncated"] = True
+    return fields
+
+
 async def _react_steps(gw, messages: list, user_id: str,
                        start_step: int, max_steps: int,
                        trace_id: str = None, model: str = None) -> str:
@@ -273,12 +322,16 @@ async def _react_steps(gw, messages: list, user_id: str,
             action = data.get("action", {})
 
             print(f"\n[THOUGHT {step+1}] {thought}")
-            log_event("react_step", {
+            step_payload = {
                 "step": step + 1,
                 "thought": thought,
                 "action_type": action.get("type"),
                 "tool_name": action.get("tool_name"),
-            }, trace_id=trace_id)
+            }
+            if action.get("type") == "tool":
+                step_payload.update(
+                    _trace_tool_input(action.get("tool_input"), trace_id))
+            log_event("react_step", step_payload, trace_id=trace_id)
 
             # ---------- FINAL ----------
             if action.get("type") == "final":

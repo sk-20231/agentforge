@@ -116,3 +116,119 @@ class TestRunAgentOutputGuardrail:
         )
         out = run_agent("u1", "s1", "x")
         assert "ceo@corp.com" in out  # guardrail off -> not redacted
+
+
+# --------------------- structured scanning (Step 21b.1) ---------------------
+
+class TestScanStructured:
+    """``scan_structured`` walks a dict/list and scrubs + bounds every string.
+
+    Used to make tool ARGUMENTS safe to write to the trace log. The shape must
+    survive the walk — a trajectory reader parses these records back.
+    """
+
+    def test_shape_is_preserved_and_clean_args_untouched(self):
+        r = output_guardrail.scan_structured({"city": "Paris", "days": 3})
+        assert r.value == {"city": "Paris", "days": 3}
+        assert r.count == 0
+        assert r.types == []
+        assert r.truncated is False
+
+    def test_string_value_is_redacted(self):
+        r = output_guardrail.scan_structured({"to": "ceo@corp.com"})
+        assert "ceo@corp.com" not in json.dumps(r.value)
+        assert r.value["to"] == "[REDACTED_EMAIL]"
+        assert r.types == ["EMAIL"]
+        assert r.count == 1
+
+    def test_keys_are_never_scanned(self):
+        """Keys come from the tool's JSON Schema — vocabulary, not user data.
+        Scanning them would rename fields and corrupt the record."""
+        r = output_guardrail.scan_structured({"ceo@corp.com": "Paris"})
+        assert list(r.value.keys()) == ["ceo@corp.com"]
+        assert r.count == 0
+
+    def test_nested_dict_and_list_are_walked(self):
+        r = output_guardrail.scan_structured(
+            {"outer": {"inner": ["ok", "ceo@corp.com"]}})
+        assert r.value == {"outer": {"inner": ["ok", "[REDACTED_EMAIL]"]}}
+        assert r.count == 1
+
+    def test_long_string_is_capped_and_flagged(self):
+        r = output_guardrail.scan_structured({"q": "x" * 50}, max_chars=10)
+        assert r.value["q"] == "x" * 10 + "...[truncated]"
+        assert r.truncated is True
+
+    def test_zero_max_chars_disables_the_per_string_cap(self):
+        r = output_guardrail.scan_structured({"q": "x" * 50}, max_chars=0)
+        assert r.value["q"] == "x" * 50
+        assert r.truncated is False
+
+    def test_long_list_is_clipped_and_flagged(self):
+        r = output_guardrail.scan_structured({"items": list(range(100))},
+                                             max_items=3)
+        assert r.value["items"] == [0, 1, 2]
+        assert r.truncated is True
+
+    def test_deep_nesting_is_depth_capped(self):
+        deep = {"a": {"b": {"c": {"d": {"e": "too far"}}}}}
+        r = output_guardrail.scan_structured(deep, max_depth=2)
+        assert r.truncated is True
+        assert "too far" not in json.dumps(r.value)
+
+    def test_booleans_and_none_pass_through_unchanged(self):
+        """bool is a subclass of int — it must not be stringified."""
+        r = output_guardrail.scan_structured({"flag": True, "off": False,
+                                              "nothing": None})
+        assert r.value == {"flag": True, "off": False, "nothing": None}
+
+    def test_ordinary_number_is_not_converted_to_string(self):
+        r = output_guardrail.scan_structured({"days": 3, "temp": 21.5})
+        assert r.value == {"days": 3, "temp": 21.5}
+
+    def test_card_number_sent_as_an_int_is_still_redacted(self):
+        """The regex floor only sees strings, so a numeric card would otherwise
+        walk straight into the log."""
+        r = output_guardrail.scan_structured({"card": 4111111111111111})
+        assert r.value["card"] == "[REDACTED_CREDIT_CARD]"
+        assert "CREDIT_CARD" in r.types
+
+    def test_bare_string_input_is_supported(self):
+        """A model can emit a non-dict tool_input; it is logged as attempted."""
+        r = output_guardrail.scan_structured("mail ceo@corp.com")
+        assert r.value == "mail [REDACTED_EMAIL]"
+
+    def test_types_are_reported_without_values(self):
+        r = output_guardrail.scan_structured(
+            {"a": "ceo@corp.com", "b": "sk-abcdef0123456789ABCDEFGHIJ"})
+        assert set(r.types) == {"EMAIL", "SECRET"}
+        blob = json.dumps({"value": r.value, "types": r.types})
+        assert "ceo@corp.com" not in blob
+        assert "sk-abcdef0123456789ABCDEFGHIJ" not in blob
+
+
+class TestScanOutputEngineOverride:
+    def test_engine_argument_overrides_the_configured_engine(self, monkeypatch):
+        """The per-call override is what keeps scan_structured off the model path."""
+        monkeypatch.setattr(output_guardrail, "AGENT_OUTPUT_GUARDRAIL_ENGINE", "presidio")
+        # Pretend the engine loaded, so the config alone WOULD take that branch.
+        monkeypatch.setattr(output_guardrail, "_get_presidio", lambda: object())
+        called = {"presidio": False}
+
+        def _boom(*a, **kw):
+            called["presidio"] = True
+            raise AssertionError("presidio must not run when engine='regex'")
+
+        monkeypatch.setattr(output_guardrail, "_scan_presidio", _boom)
+        r = scan_output("mail ceo@corp.com", engine="regex")
+        assert "[REDACTED_EMAIL]" in r.redacted_text
+        assert called["presidio"] is False
+
+    def test_engine_none_still_follows_config(self, monkeypatch):
+        """Backward compat: existing callers pass no engine and are unaffected."""
+        monkeypatch.setattr(output_guardrail, "AGENT_OUTPUT_GUARDRAIL_ENGINE", "presidio")
+        monkeypatch.setattr(output_guardrail, "_get_presidio", lambda: object())
+        monkeypatch.setattr(
+            output_guardrail, "_scan_presidio",
+            lambda text, aggressive: output_guardrail.OutputScanResult("PRESIDIO", 1, ["X"]))
+        assert scan_output("mail ceo@corp.com").redacted_text == "PRESIDIO"

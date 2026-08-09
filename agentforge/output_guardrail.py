@@ -264,7 +264,8 @@ def _scan_presidio(text: str, aggressive: bool) -> OutputScanResult:
     return OutputScanResult(anonymized.text, len(results), types_found)
 
 
-def scan_output(text: str, aggressive: bool = None) -> OutputScanResult:
+def scan_output(text: str, aggressive: bool = None,
+                engine: str = None) -> OutputScanResult:
     """Redact PII from ``text`` using the configured engine.
 
     Dispatches per ``AGENT_OUTPUT_GUARDRAIL_ENGINE``: "auto" prefers Presidio + GLiNER
@@ -273,15 +274,137 @@ def scan_output(text: str, aggressive: bool = None) -> OutputScanResult:
     regex only if the engine truly can't load). ``aggressive`` adds the IP/phone opt-in
     set; when ``None`` it follows ``AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE``. Empty/blank
     text returns unchanged. Never raises and never logs the PII values themselves.
+
+    ``engine`` overrides the configured engine for ONE call; ``None`` (the default)
+    keeps the previous behaviour, so every existing caller is unaffected. It exists
+    for callers that scan many tiny strings on a hot path and must not pay for a
+    model forward pass each time — see ``scan_structured``.
     """
     if not text:
         return OutputScanResult(text or "", 0, [])
     if aggressive is None:
         aggressive = AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE
+    engine = (engine or AGENT_OUTPUT_GUARDRAIL_ENGINE).lower()
 
-    if AGENT_OUTPUT_GUARDRAIL_ENGINE in ("auto", "presidio") and _get_presidio() is not None:
+    if engine in ("auto", "presidio") and _get_presidio() is not None:
         try:
             return _scan_presidio(text, aggressive)
         except Exception as exc:  # any scan-time failure -> never weaker than regex
             logger.warning("Output guardrail Presidio scan failed (%s); using regex.", exc)
     return _scan_regex(text, aggressive)
+
+
+# ---------------------------------------------------------------------------
+# Structured (dict / list) scanning — Step 21b.1
+# ---------------------------------------------------------------------------
+
+# Bounds on the walk itself, independent of the per-string cap the caller sets.
+# Tool arguments are shallow and small in practice; these stop a pathological
+# model-generated value from writing an unbounded record to the trace log.
+_STRUCTURED_MAX_ITEMS = 20
+_STRUCTURED_MAX_DEPTH = 4
+
+
+@dataclass
+class StructuredScanResult:
+    """Result of scanning a structured value (dict / list / scalar) for PII.
+
+    ``value`` has the SAME shape as the input, with every string redacted and
+    capped. ``count`` / ``types`` mirror :class:`OutputScanResult` (categories
+    only — never the values). ``truncated`` is True when any cap bit: a string
+    was cut, a sequence was clipped, or the walk hit its depth limit.
+    """
+    value: object
+    count: int = 0
+    types: List[str] = field(default_factory=list)
+    truncated: bool = False
+
+
+def scan_structured(value, aggressive: bool = None, engine: str = "regex",
+                    max_chars: int = 500,
+                    max_items: int = _STRUCTURED_MAX_ITEMS,
+                    max_depth: int = _STRUCTURED_MAX_DEPTH) -> StructuredScanResult:
+    """Redact + bound a structured value so it is safe to write to a log.
+
+    WHY the strings and not the serialised blob: redacting a JSON string can drop
+    a replacement across a quote and leave the record unparseable. Walking the
+    structure and scanning each string VALUE keeps the shape intact by
+    construction. Dict KEYS are never scanned — they come from the tool's own
+    JSON Schema, so they are vocabulary, not user data.
+
+    WHY ``engine`` defaults to "regex": this runs on a hot path over strings that
+    are typically a handful of characters ("Paris"). A GLiNER forward pass per
+    call would add latency for almost no yield, and NER precision on 6-character
+    strings is exactly where the #27 false-positive tax is worst. The regex floor
+    is deterministic, free, and still catches the categories that actually matter
+    in a log file — secrets, emails, SSNs, cards. Pass ``engine=None`` to follow
+    the configured engine instead.
+
+    Numbers are scanned as text (a card number can arrive as an int, and the
+    regex floor only sees strings); a redacted number therefore comes back as a
+    string — the shape change is itself the signal. Booleans and None pass
+    through untouched.
+
+    ``max_chars <= 0`` disables the per-string cap (the sequence and depth caps
+    always apply). Callers that want to skip scanning altogether should not call
+    this at all.
+    """
+    types: List[str] = []
+    state = {"count": 0, "truncated": False}
+
+    def note(result: OutputScanResult) -> None:
+        state["count"] += result.count
+        for t in result.types:
+            if t not in types:
+                types.append(t)
+
+    def walk(node, depth: int):
+        if depth > max_depth:
+            state["truncated"] = True
+            return "[depth-capped]"
+
+        if isinstance(node, str):
+            scanned = scan_output(node, aggressive=aggressive, engine=engine)
+            note(scanned)
+            text = scanned.redacted_text
+            if max_chars > 0 and len(text) > max_chars:
+                state["truncated"] = True
+                return text[:max_chars] + "...[truncated]"
+            return text
+
+        # bool is a subclass of int — check it first so True doesn't become "True".
+        if isinstance(node, bool) or node is None:
+            return node
+
+        if isinstance(node, (int, float)):
+            scanned = scan_output(str(node), aggressive=aggressive, engine=engine)
+            if scanned.count:
+                note(scanned)
+                return scanned.redacted_text
+            return node
+
+        if isinstance(node, dict):
+            out = {}
+            for i, (k, v) in enumerate(node.items()):
+                if i >= max_items:
+                    state["truncated"] = True
+                    break
+                out[str(k)] = walk(v, depth + 1)
+            return out
+
+        if isinstance(node, (list, tuple)):
+            out = []
+            for i, v in enumerate(node):
+                if i >= max_items:
+                    state["truncated"] = True
+                    break
+                out.append(walk(v, depth + 1))
+            return out
+
+        # Anything else (an object the model somehow produced) becomes its repr,
+        # scanned and capped like any other string rather than trusted verbatim.
+        return walk(repr(node), depth)
+
+    scanned_value = walk(value, 0)
+    return StructuredScanResult(scanned_value, state["count"], types,
+                                state["truncated"])

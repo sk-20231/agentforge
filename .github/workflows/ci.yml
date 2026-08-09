@@ -3,9 +3,13 @@
 # =============================================================================
 #
 # WHAT THIS DOES:
-#   Runs all 127 unit tests on every push and pull request.
+#   Runs the full unit-test suite on every push and pull request.
 #   These tests use mocked OpenAI calls — no real API key needed.
-#   Fast gate: if the code is broken, this tells you in ~30 seconds.
+#   Fast gate: if the code is broken, this tells you quickly.
+#
+#   (This comment used to hard-code a test count. It rotted — it said 127 while
+#   the suite was past 400. Counts belong in the badge, which is generated from
+#   the run below, not in prose a human has to remember to update.)
 #
 # WHY TWO SEPARATE WORKFLOWS?
 #   This one answers: "Does the code work?"
@@ -34,6 +38,11 @@ jobs:
   test:
     name: Run unit tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+
+    # Needed only by the badge step below, which force-pushes a one-file
+    # `badges` branch. Everything else here is read-only.
+    permissions:
+      contents: write
 
     strategy:
       matrix:
@@ -85,4 +94,42 @@ jobs:
       #    mechanism that blocks a PR merge when tests are red.
       # -----------------------------------------------------------------------
       - name: Run unit tests
-        run: pytest tests/ -v --tb=short
+        run: pytest tests/ -v --tb=short --junitxml=junit.xml
+
+      # -----------------------------------------------------------------------
+      # 5. Publish the test-count badge
+      #
+      #    Only on a push to main — PRs must never write to the repo, and a
+      #    fork's token could not anyway.
+      #
+      #    The payload goes to a dedicated `badges` branch, NOT to main. Writing
+      #    it to main would put a bot commit in the project history on every
+      #    push and would fight branch protection once that is enabled. The
+      #    branch holds exactly one generated file, so it is force-pushed as a
+      #    single commit: there is no history there worth preserving.
+      #
+      #    Runs even if tests failed (`always()`) so a red suite produces a RED
+      #    badge instead of leaving a stale green one up. `if: always()` still
+      #    honours the ref/event guard below, and the job's own exit status is
+      #    unaffected — a failing suite still fails CI.
+      # -----------------------------------------------------------------------
+      - name: Publish test-count badge
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -f junit.xml || { echo "no junit.xml — skipping badge"; exit 0; }
+          python .github/scripts/make_tests_badge.py junit.xml > /tmp/tests.json
+          echo "badge payload: $(cat /tmp/tests.json)"
+
+          WORK="$(mktemp -d)"
+          cp /tmp/tests.json "$WORK/tests.json"
+          cd "$WORK"
+          git init -q -b badges
+          git add tests.json
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "chore(badge): publish test count [skip ci]"
+          git push -q --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges

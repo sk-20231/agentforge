@@ -1,25 +1,25 @@
 # AgentForge
 
-> An AI agent built core-up — both to understand AI engineering deeply and to grow into a genuinely usable agent. Its core — intent routing, semantic memory, RAG with citation guardrails, ReAct reasoning, evaluation gating in CI, cost tracking, and trace observability — is built from primitives against the OpenAI API to expose every moving part. Tools are then served over **MCP (Model Context Protocol)** through a shared gateway, including a third-party server consumed safely. The goal: understand the internals, be fluent with the tools the industry runs on, and harden it toward real, multi-user use.
+> An AI agent with intent routing, semantic memory, RAG with citation guardrails, ReAct reasoning, tools over **MCP (Model Context Protocol)**, prompt-injection defences, CI eval gating, difficulty-based model routing, and full trace/cost observability. The core is built from primitives against the OpenAI API — so every moving part stays visible, debuggable, and tunable — then extended with the tools the industry actually runs on. Built to harden toward real, multi-user use.
 
 ![CI](https://github.com/sk-20231/agentforge/actions/workflows/ci.yml/badge.svg)
 ![Eval Gate](https://github.com/sk-20231/agentforge/actions/workflows/eval.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
-![Tests](https://img.shields.io/badge/tests-393_passing-blue)
+![Tests](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/sk-20231/agentforge/badges/tests.json)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
 ## Why this exists
 
-The fastest way to truly *understand* an AI system is to build its core yourself. Reach for a high-level framework first and the parts that matter when you need to **debug, evaluate, or scale** stay hidden:
+Owning the core of an agent — instead of deferring it to a framework — is what keeps the parts that matter for **debugging, evaluation, and scale** in your hands. Reach for a high-level framework first and those parts stay hidden:
 
 - What does retrieval actually return?
 - Why did the model hallucinate that citation?
 - Which prompt burned the token budget?
 - How do you *know* the new embedding model didn't regress quality?
 
-So AgentForge's core is built from the ground up — every decision (chunk size, similarity metric, routing logic, citation format, eval thresholds) is visible and tunable. **Then**, from that understanding, it integrates the production-grade tools the industry actually uses — starting with **MCP (Model Context Protocol)** for tool/resource interop, including consuming a third-party server behind a client-side security boundary. The point isn't to avoid frameworks; it's to understand *what's really happening* behind an agent **and** be fluent with the tooling teams ship on.
+So AgentForge's core is built from the ground up — every decision (chunk size, similarity metric, routing logic, citation format, eval thresholds) is visible and tunable. **Then**, from that understanding, it integrates the tools the industry actually uses — starting with **MCP (Model Context Protocol)** for tool/resource interop, including consuming a third-party server behind a client-side security boundary. The point isn't to avoid frameworks; it's to understand *what's really happening* behind an agent **and** be fluent with the tooling teams ship on.
 
 ---
 
@@ -32,6 +32,7 @@ An interactive agent (CLI or Streamlit UI) that can:
 - **Use tools over MCP** — Wikipedia, weather (open-meteo), and HackerNews run as our own MCP servers, plus a third-party `fetch` server consumed over the protocol. All tool output is sanitized and wrapped as untrusted data to defend against indirect prompt injection; untrusted third-party servers also get a client-side SSRF URL guard
 - **Zero hardcoded tools** — both the ACT and ReAct pipelines discover and call every tool at runtime over MCP through a shared gateway; adding a tool means adding a server, not editing the agent
 - **Multi-step reasoning** — ReAct (Reason + Act) loop for complex tasks
+- **Route by difficulty** — reuse the intent label to send routine turns to a small model and escalate only multi-step reasoning to a frontier model (off by default; opt in per your bill)
 - **Answer from documents (RAG)** — chunk, embed, retrieve, generate with a citation guardrail that strips hallucinated references
 - **Personalize** answers with stored user facts
 - **Rewrite follow-ups** into standalone queries so "How does it work?" retrieves correctly in a 10-turn conversation
@@ -92,6 +93,7 @@ Every LLM call goes through a `Span` context manager that records start/end time
 | **CI/CD eval gating** | [`.github/workflows/eval.yml`](.github/workflows/eval.yml) | Fail the build if Recall@K < 70% or faithfulness < 80% |
 | **Trace logging** | [`logger.py — Span`](agentforge/logger.py) | Every run has a trace_id, per-span latency, JSONL events |
 | **Cost tracking** | [`logger.py — log_token_usage`](agentforge/logger.py) | Per-operation USD cost, visible in the Streamlit sidebar |
+| **Model routing / cost** | [`router.py`](agentforge/router.py) + [`logger.py — compute_routing_summary`](agentforge/logger.py) | Send easy turns to a cheap model, hard turns to a frontier model — reusing the intent label as a free difficulty signal |
 | **Embedding model provenance** | [`rag/document_store.py`](agentforge/rag/document_store.py) | Corpus stores which model generated the embeddings — fail fast on mismatch |
 
 ---
@@ -170,6 +172,18 @@ Following Meta's **"Agents Rule of Two"** (an agent session shouldn't combine un
 - **Every request and decision is audited** (`approval_requested` / `approved` / `denied`, with the approval *scope*: once, grant created, grant used) with argument *names* only — never values.
 
 This is the hand-rolled version of what LangGraph ships as `interrupt()` + a checkpointer; building it from primitives first is deliberate (see [Why this exists](#why-this-exists)).
+
+### 6. Model routing — reuse a signal you already have
+
+Sending every turn to a frontier model is wasteful when most turns are easy. A router estimates each turn's difficulty and keeps routine turns on a small model, escalating only the hard ones.
+
+The point worth noting isn't the routing — it's that it costs almost nothing to add. The intent classifier (decision #1) already runs first on every turn, so its label doubles as the difficulty signal: multi-step ReAct escalates to the frontier tier, everything else stays small. **No second "difficulty classifier" call.** And when the classifier is unsure, the turn routes *up*, not down — a cheaper bill isn't worth a wrong answer you could have avoided.
+
+**Backward-compatible by default:** the frontier tier defaults to the *same* model as the small tier, so a fresh clone's behaviour and cost are unchanged until you set `AGENT_MODEL_FRONTIER` to a distinct model.
+
+The cost tracker splits spend by tier and compares it to an "everything at the frontier" baseline (`compute_routing_summary`, visible in the Streamlit cost panel). On one small local run (`frontier=gpt-4o`, `small=gpt-4o-mini`, one routine + one ReAct turn), the routed run cost roughly half of the all-frontier baseline. **That percentage is entirely mix-dependent** — it reflects the ratio of easy to hard turns in a tiny sample, not a benchmark. Measure it on your own traffic; the reusable idea is the free difficulty signal, not the figure.
+
+See [`router.py`](agentforge/router.py) and [`logger.py — compute_routing_summary`](agentforge/logger.py).
 
 ---
 

@@ -2,7 +2,12 @@
 openai>=1.0.0
 numpy>=1.24.0
 streamlit>=1.30.0
-mcp[cli]>=1.0.0
+# Upper bound is deliberate. mcp 2.0.0 is a breaking major release (it renamed
+# McpError -> MCPError, among other changes) and this code has only ever been
+# tested against 1.x. Without the bound, a fresh clone installs 2.x and the
+# repo is broken on arrival for everyone but the maintainer, whose venv predates
+# the release. Raise it on purpose, after testing, not by accident.
+mcp[cli]>=1.0.0,<2.0.0
 
 # Optional: load .env from project root (agent/config.py will use it if installed)
 python-dotenv>=1.0.0

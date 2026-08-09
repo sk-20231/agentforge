@@ -203,5 +203,15 @@ MCP_SERVERS: dict = {
     # Third-party: Anthropic reference web-fetch server. Launched via uvx and
     # pinned to a specific PyPI version (supply-chain hygiene). Untrusted: the
     # gateway wraps its output and blocks internal/private URLs (SSRF guard).
-    "fetch":     {"command": "uvx", "args": ["--from", "mcp-server-fetch==2026.6.4", "mcp-server-fetch"], "trusted": False},
+    #
+    # The `--with "mcp<2"` bound is NOT redundant with the `--from` pin. uvx
+    # builds this server its own isolated environment and resolves the server's
+    # TRANSITIVE dependencies fresh — so pinning the server alone still let the
+    # mcp SDK float to 2.0.0, which renamed McpError -> MCPError and made the
+    # pinned server crash on import. Discovery then failed on every turn and the
+    # gateway failed open: the agent silently ran without the fetch tool.
+    # Pinning what you depend on is not enough when it depends on something else.
+    "fetch":     {"command": "uvx",
+                  "args": ["--from", "mcp-server-fetch==2026.6.4", "--with", "mcp<2", "mcp-server-fetch"],
+                  "trusted": False},
 }

@@ -335,8 +335,13 @@ class TestLogTokenUsage:
         with patch("agentforge.logger.AGENT_LOG_FILE", log_file):
             log_token_usage(resp, "fallback_test")
         with open(log_file, encoding="utf-8") as f:
-            record = json.loads(f.readline())
-        assert record["payload"]["cost_usd"] > 0
+            records = [json.loads(line) for line in f if line.strip()]
+
+        # An unpriced id now also emits a warning event first (issue #39), so select
+        # the usage record by event type rather than by position.
+        usage = next(r for r in records if r["event"] == "token_usage")
+        assert usage["payload"]["cost_usd"] > 0
+        assert any(r["event"] == "cost_model_unpriced" for r in records)
 
 
 class TestComputeCostSummary:

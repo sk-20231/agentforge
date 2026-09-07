@@ -95,6 +95,51 @@ MODEL_COSTS: dict[str, dict[str, float]] = {
     "gpt-3.5-turbo": {"prompt": 0.50 / 1_000_000, "completion": 1.50 / 1_000_000},
 }
 
+# Rates used when a model id matches nothing in MODEL_COSTS. It is the CHEAPEST
+# entry, so an unrecognised id always UNDER-states spend — the reason issue #39
+# stayed hidden. Every fallback is therefore warned about (once per id).
+_FALLBACK_COST_MODEL = "gpt-4o-mini"
+
+# Model ids already warned about, so one unpriced model can't flood the log.
+_UNPRICED_MODELS_WARNED: set[str] = set()
+
+
+def _costs_for_model(model: str, warn_on_fallback: bool = True) -> dict[str, float]:
+    """Resolve a model id to its per-token rates, tolerating DATED ids (issue #39).
+
+    The OpenAI API returns a dated id ("gpt-4o-2024-08-06"), which never equals the
+    unversioned MODEL_COSTS keys — so an exact-match lookup missed on every real call
+    and silently billed it at the cheapest rate. Measured ~9x under on a frontier turn.
+
+    Resolution mirrors ``_tier_for_model``: exact match first, then LONGEST prefix, so
+    "gpt-4o-mini-2024-07-18" resolves to "gpt-4o-mini" and not to the "gpt-4o" that
+    also prefixes it. Getting that precedence backwards would over-charge mini traffic
+    by ~17x, so the longest-match rule is load-bearing in both directions.
+
+    Args:
+        model: The model id as logged (dated or not).
+        warn_on_fallback: Emit a warning event when nothing matches. Read-only callers
+            (the compute_* summaries) pass False so that reading the log cannot append
+            to the log it is midway through reading.
+    """
+    if model and model in MODEL_COSTS:
+        return MODEL_COSTS[model]
+
+    if model:
+        prefixes = [key for key in MODEL_COSTS if model.startswith(key)]
+        if prefixes:
+            return MODEL_COSTS[max(prefixes, key=len)]
+
+    if warn_on_fallback and model not in _UNPRICED_MODELS_WARNED:
+        _UNPRICED_MODELS_WARNED.add(model)
+        log_event("cost_model_unpriced", {
+            "model": model,
+            "priced_as": _FALLBACK_COST_MODEL,
+            "known_models": sorted(MODEL_COSTS),
+            "note": "unknown model id priced at the cheapest known rate — cost is UNDER-stated",
+        })
+    return MODEL_COSTS[_FALLBACK_COST_MODEL]
+
 
 def log_token_usage(
     response,
@@ -122,7 +167,7 @@ def log_token_usage(
         completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
         total_tokens = prompt_tokens + completion_tokens
 
-        costs = MODEL_COSTS.get(model_name, MODEL_COSTS.get("gpt-4o-mini"))
+        costs = _costs_for_model(model_name)
         cost_usd = (prompt_tokens * costs["prompt"]) + (completion_tokens * costs["completion"])
 
         log_event("token_usage", {
@@ -239,13 +284,14 @@ def compute_routing_summary(log_path: str = None) -> dict:
     from agentforge.config import MODEL_TIER_SMALL, MODEL_TIER_FRONTIER
 
     path = log_path or AGENT_LOG_FILE
-    # Price each tier at its CANONICAL rate. We deliberately do NOT trust the logged
-    # per-call cost_usd here: log_token_usage falls back to gpt-4o-mini pricing for
-    # any model id it doesn't recognise (and every id it sees is dated, so a distinct
-    # frontier tier would be mis-priced). Recomputing from token counts + tier makes
-    # this summary internally consistent regardless of that quirk.
-    small_costs = MODEL_COSTS.get(MODEL_TIER_SMALL, MODEL_COSTS["gpt-4o-mini"])
-    frontier_costs = MODEL_COSTS.get(MODEL_TIER_FRONTIER, MODEL_COSTS["gpt-4o-mini"])
+    # Price each tier at its CANONICAL rate, recomputed from token counts rather than
+    # summed from the logged per-call cost_usd. Those two agree now that log_token_usage
+    # resolves dated ids (issue #39), but recomputing keeps this summary internally
+    # consistent even for records written BEFORE that fix, which are still in the log.
+    # warn_on_fallback=False: this is a read path, and it must not append to the log
+    # file it is about to read.
+    small_costs = _costs_for_model(MODEL_TIER_SMALL, warn_on_fallback=False)
+    frontier_costs = _costs_for_model(MODEL_TIER_FRONTIER, warn_on_fallback=False)
     tier_costs = {"small": small_costs, "frontier": frontier_costs}
 
     def _price(costs, p_tok, c_tok):

@@ -479,7 +479,8 @@ class TestSpotlightInvariant:
 
 
 class TestThirdPartySupplyChainPins:
-    """Guards on how the third-party `fetch` server is launched.
+    """Guards on third-party version bounds: how the `fetch` server is launched,
+    and what `requirements.txt` lets a fresh clone install.
 
     Regression cover for the failure where `mcp-server-fetch` was version-pinned
     but its TRANSITIVE `mcp` SDK was not. uvx resolved the SDK fresh, picked up
@@ -490,6 +491,15 @@ class TestThirdPartySupplyChainPins:
     These assert the SHAPE of the pin, not exact versions, so bumping a version
     on purpose stays easy while removing a bound trips the build.
     """
+
+    @staticmethod
+    def _requirement_lines():
+        from pathlib import Path
+        req = Path(__file__).resolve().parent.parent / "requirements.txt"
+        return [
+            ln.strip() for ln in req.read_text(encoding="utf-8").splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
 
     def _fetch_args(self):
         from agentforge.config import MCP_SERVERS
@@ -524,14 +534,23 @@ class TestThirdPartySupplyChainPins:
     def test_requirements_bounds_our_own_mcp_sdk(self):
         # Same class of bug one level up: a fresh clone running
         # `pip install -r requirements.txt` must not pull the 2.x major either.
-        from pathlib import Path
-        req = Path(__file__).resolve().parent.parent / "requirements.txt"
-        lines = [
-            ln.strip() for ln in req.read_text(encoding="utf-8").splitlines()
-            if ln.strip() and not ln.strip().startswith("#")
-        ]
-        mcp_lines = [ln for ln in lines if ln.startswith("mcp")]
+        mcp_lines = [ln for ln in self._requirement_lines() if ln.startswith("mcp")]
         assert mcp_lines, "requirements.txt should declare the mcp SDK"
         assert any("<" in ln or "==" in ln for ln in mcp_lines), (
             f"mcp requirement needs an upper bound, got {mcp_lines}"
         )
+
+    def test_requirements_bounds_langgraph_stack(self):
+        # langgraph-checkpoint declares langchain-core with no upper bound, so
+        # the two transitive packages are bounded here ourselves rather than
+        # trusting a sibling package to keep supplying the ceiling.
+        import re
+        declared = {}
+        for ln in self._requirement_lines():
+            name = re.match(r"[A-Za-z0-9_.\-]+", ln).group(0).lower().replace("_", "-")
+            declared[name] = ln
+        for pkg in ("langgraph", "langchain-core", "langsmith"):
+            assert pkg in declared, f"requirements.txt should declare {pkg}"
+            assert "<" in declared[pkg] or "==" in declared[pkg], (
+                f"{pkg} requirement needs an upper bound, got {declared[pkg]!r}"
+            )

@@ -28,6 +28,7 @@ from agentforge.memory.semantic import get_relevant_memories, store_memory
 from agentforge.output_guardrail import scan_structured
 from agentforge.safety import wrap_untrusted
 from agentforge.logger import log_event, log_token_usage
+from agentforge.reply import reply_text
 
 _client = None  # created on first API call, not at import time
 
@@ -338,7 +339,7 @@ async def _react_steps(gw, messages: list, user_id: str,
                 if data.get("store_memory") and data.get("memory_text"):
                     store_memory(user_id, data["memory_text"])
 
-                reply = data.get("reply", "")
+                reply = reply_text(data.get("reply"), source="react", trace_id=trace_id)
                 log_event("react_end", {"steps_taken": step + 1, "reply_length": len(reply)},
                           trace_id=trace_id)
                 return reply

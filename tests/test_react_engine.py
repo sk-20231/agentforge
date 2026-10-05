@@ -41,6 +41,7 @@ def _fake_gateway_cm(gw):
     """Return a drop-in replacement for the mcp_gateway async context manager."""
     @contextlib.asynccontextmanager
     async def _cm(trace_id=None, approval_handler=None):
+        gw.approval_handler = approval_handler  # what the real gateway would consult
         yield gw
     return _cm
 
@@ -355,6 +356,31 @@ class TestReactErrorHandling:
             result = react_loop("u1", "keep going", max_steps=2)
         assert "too many" in result.lower()
 
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_large_max_steps_is_not_cut_off_by_graph_recursion_limit(
+            self, mock_client, mock_mem, mock_log):
+        """Each step is two graph steps (think + act). LangGraph's default
+        recursion limit (25) would raise GraphRecursionError at max_steps 13;
+        the loop must still run every step and stop on its own budget."""
+        tool_response = json.dumps({
+            "thought": "need more info",
+            "action": {"type": "tool", "tool_name": "search_wikipedia", "tool_input": {"topic": "x"}},
+        })
+        mock_msg = MagicMock()
+        mock_msg.content = tool_response
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=mock_msg)]
+        )
+        gw = _FakeGateway(call_result="some observation")
+
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(gw):
+            result = react_loop("u1", "keep going", max_steps=15)
+        assert "too many" in result.lower()
+        assert len(gw.calls) == 15
+
 
 class TestObservationCompression:
     """Issue #8: oversized observations are compressed (query-focused) before
@@ -577,9 +603,13 @@ class TestReactTraceId:
         from agentforge.approval import ApprovalRequired, ApprovalRequest
 
         class _GatedGateway(_FakeGateway):
+            # Like the real gate: consult the handler, which may pause the turn.
             async def call(self, tool_name, arguments):
-                raise ApprovalRequired(
+                return self.approval_handler(
                     ApprovalRequest(tool_name, "ext", arguments))
+
+        def _raising_handler(request):
+            raise ApprovalRequired(request)
 
         tool_step = json.dumps({
             "thought": "fetch it",
@@ -597,7 +627,8 @@ class TestReactTraceId:
         with _patch_gateway(_GatedGateway()):
             with pytest.raises(ApprovalRequired) as excinfo:
                 react_loop("u1", "get the page", max_steps=2,
-                           trace_id=self.TRACE)
+                           trace_id=self.TRACE,
+                           approval_handler=_raising_handler)
 
         assert excinfo.value.continuation["trace_id"] == self.TRACE
 

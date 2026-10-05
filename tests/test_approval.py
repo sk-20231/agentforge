@@ -432,26 +432,36 @@ class TestReactResume:
                                     approval_handler=_raising_handler)
         return excinfo.value
 
-    def test_interrupt_carries_the_react_continuation(self):
+    @staticmethod
+    def _checkpointed(react_engine, interrupt):
+        """The paused turn's state, read from the graph's checkpointer (Step
+        21.1). The continuation carries only the thread_id handle."""
+        config = {"configurable": {"thread_id": interrupt.continuation["thread_id"]}}
+        return react_engine._graph().get_state(config).values
+
+    def test_interrupt_checkpoints_the_pending_call(self):
         session = _make_session_mock([_make_mcp_tool("fetch")])
         with contextlib.ExitStack() as stack:
             react_engine, _ = self._react_env(stack, session, [_REACT_TOOL_STEP])
             interrupt = self._capture_interrupt(react_engine)
+            state = self._checkpointed(react_engine, interrupt)
 
         cont = interrupt.continuation
         assert cont["pipeline"] == "react"
         assert cont["user_id"] == "u1"
-        assert cont["step"] == 0
-        assert cont["tool_name"] == "fetch"
-        assert cont["tool_input"] == {"url": "http://8.8.8.8/page"}
-        assert cont["raw"] == _REACT_TOOL_STEP          # the step that proposed it
-        assert any(m.get("content") == "plan a trip" for m in cont["messages"]
+        assert cont["thread_id"]
+        assert state["step"] == 1                       # one think step taken
+        assert state["tool_name"] == "fetch"
+        assert state["tool_input"] == {"url": "http://8.8.8.8/page"}
+        assert state["raw"] == _REACT_TOOL_STEP          # the step that proposed it
+        assert any(m.get("content") == "plan a trip" for m in state["messages"]
                    if m.get("role") == "user")
+        assert interrupt.request.arguments == {"url": "http://8.8.8.8/page"}
         session.call_tool.assert_not_called()           # interrupted before dispatch
 
-    def test_interrupt_freezes_routed_model_in_continuation(self):
+    def test_interrupt_freezes_routed_model_in_checkpoint(self):
         # Step 28: a frontier-routed REACT turn must RESUME on frontier, so the
-        # routed model is frozen into the continuation alongside the trace/grant.
+        # routed model is checkpointed alongside the trace/grant.
         session = _make_session_mock([_make_mcp_tool("fetch")])
         with contextlib.ExitStack() as stack:
             react_engine, _ = self._react_env(stack, session, [_REACT_TOOL_STEP])
@@ -459,7 +469,78 @@ class TestReactResume:
                 react_engine.react_loop("u1", "plan a trip",
                                         approval_handler=_raising_handler,
                                         model="frontier-model")
-        assert excinfo.value.continuation["model"] == "frontier-model"
+            state = self._checkpointed(react_engine, excinfo.value)
+        assert state["model"] == "frontier-model"
+
+    def test_resume_does_not_re_run_the_llm_for_the_paused_step(self):
+        # The node boundary at work: LangGraph re-runs only ``act`` on resume.
+        # A re-run ``think`` would regenerate the approved call (the replay bug)
+        # — and would show up here as a third LLM call.
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        with contextlib.ExitStack() as stack:
+            react_engine, client = self._react_env(
+                stack, session, [_REACT_TOOL_STEP, _REACT_FINAL_STEP])
+            interrupt = self._capture_interrupt(react_engine)
+            assert client.chat.completions.create.call_count == 1
+            react_engine.resume_react_loop(interrupt, True,
+                                           approval_handler=_raising_handler)
+        assert client.chat.completions.create.call_count == 2
+
+    def test_finished_turn_is_removed_from_the_checkpointer(self):
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        with contextlib.ExitStack() as stack:
+            react_engine, _ = self._react_env(
+                stack, session, [_REACT_TOOL_STEP, _REACT_FINAL_STEP])
+            interrupt = self._capture_interrupt(react_engine)
+            react_engine.resume_react_loop(interrupt, True,
+                                           approval_handler=_raising_handler)
+            assert self._checkpointed(react_engine, interrupt) == {}
+
+    def test_second_resume_of_the_same_interrupt_is_refused(self):
+        # A double click must not dispatch the approved call twice.
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        with contextlib.ExitStack() as stack:
+            react_engine, _ = self._react_env(
+                stack, session, [_REACT_TOOL_STEP, _REACT_FINAL_STEP])
+            interrupt = self._capture_interrupt(react_engine)
+            react_engine.resume_react_loop(interrupt, True,
+                                           approval_handler=_raising_handler)
+            with pytest.raises(ValueError):
+                react_engine.resume_react_loop(interrupt, True,
+                                               approval_handler=_raising_handler)
+        session.call_tool.assert_called_once()
+
+    def test_blocking_handler_answers_without_pausing(self):
+        # The CLI path: a handler that answers synchronously never pauses the
+        # graph, and the call dispatches in the same run.
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        asked = []
+
+        def cli_handler(request):
+            asked.append(request.tool)
+            return True
+
+        with contextlib.ExitStack() as stack:
+            react_engine, _ = self._react_env(
+                stack, session, [_REACT_TOOL_STEP, _REACT_FINAL_STEP])
+            reply = react_engine.react_loop("u1", "plan a trip",
+                                            approval_handler=cli_handler)
+        assert reply == "Trip planned"
+        assert asked == ["fetch"]
+        session.call_tool.assert_called_once_with("fetch", {"url": "http://8.8.8.8/page"})
+
+    def test_no_handler_denies_by_default_without_pausing(self):
+        session = _make_session_mock([_make_mcp_tool("fetch")])
+        with contextlib.ExitStack() as stack:
+            react_engine, client = self._react_env(
+                stack, session, [_REACT_TOOL_STEP, _REACT_FINAL_STEP])
+            reply = react_engine.react_loop("u1", "plan a trip")
+        assert reply == "Trip planned"
+        session.call_tool.assert_not_called()
+        followup_messages = client.chat.completions.create.call_args.kwargs["messages"]
+        observation = next(m["content"] for m in followup_messages
+                           if m["role"] == "user" and "Observation from tool" in m["content"])
+        assert "no approval handler" in observation
 
     def test_resume_approve_dispatches_stored_call_and_finishes(self):
         session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE BODY")
@@ -499,9 +580,9 @@ class TestReactResume:
         assert "declined" in observation.lower()
 
     def test_new_gated_call_during_resume_interrupts_again(self):
-        # The one-shot grant covers ONLY the stored call. If the resumed loop
-        # proposes a DIFFERENT gated call, the fallback handler raises a fresh
-        # interrupt — with its own continuation at the later step.
+        # The decision covers ONLY the stored call. If the resumed loop
+        # proposes a DIFFERENT gated call, the fallback handler pauses the
+        # graph again — same thread, one step further in.
         session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
         with contextlib.ExitStack() as stack:
             react_engine, _ = self._react_env(
@@ -510,31 +591,52 @@ class TestReactResume:
             with pytest.raises(ApprovalRequired) as excinfo:
                 react_engine.resume_react_loop(interrupt, True,
                                                approval_handler=_raising_handler)
+            second = excinfo.value
+            state = self._checkpointed(react_engine, second)
 
-        second = excinfo.value
         assert second.request.arguments == {"url": "http://9.9.9.9/other"}
-        assert second.continuation["step"] == 1          # one step further in
+        assert second.continuation["thread_id"] == interrupt.continuation["thread_id"]
+        assert state["step"] == 2                        # one step further in
         session.call_tool.assert_called_once()           # only the approved call ran
 
     def test_resume_with_approve_turn_covers_later_calls_to_same_tool(self):
         """Issue #6 end-to-end: same scenario as the test above, but the human
         answers "allow for the rest of this turn". The second fetch (different
         URL!) rides the grant instead of interrupting again — one card for the
-        whole paging loop. The grant travels: continuation -> resumed gateway."""
+        whole paging loop. The grant travels in checkpointed state."""
         session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
         with contextlib.ExitStack() as stack:
             react_engine, _ = self._react_env(
                 stack, session,
                 [_REACT_TOOL_STEP, _REACT_SECOND_TOOL_STEP, _REACT_FINAL_STEP])
             interrupt = self._capture_interrupt(react_engine)
-            assert interrupt.continuation["granted"] == set()   # nothing granted yet
+            assert self._checkpointed(react_engine, interrupt)["granted"] == []
             reply = react_engine.resume_react_loop(interrupt, APPROVE_TURN,
                                                    approval_handler=_raising_handler)
 
         assert reply == "Trip planned"                   # turn completed, no 2nd card
         assert session.call_tool.await_count == 2        # BOTH fetches dispatched
-        # The grant was recorded in the turn's own state (the shared set).
-        assert interrupt.continuation["granted"] == {("ext", "fetch")}
+
+    def test_approve_turn_grant_survives_a_later_pause(self):
+        """The grant is written to checkpointed state, so a pause for a
+        DIFFERENT tool later in the turn does not lose it."""
+        session = _make_session_mock(
+            [_make_mcp_tool("fetch"), _make_mcp_tool("send_email")], call_text="OK")
+        email_step = json.dumps({
+            "thought": "send it",
+            "action": {"type": "tool", "tool_name": "send_email",
+                       "tool_input": {"topic": "summary"}},
+        })
+        with contextlib.ExitStack() as stack:
+            react_engine, _ = self._react_env(
+                stack, session, [_REACT_TOOL_STEP, email_step])
+            interrupt = self._capture_interrupt(react_engine)
+            with pytest.raises(ApprovalRequired) as excinfo:
+                react_engine.resume_react_loop(interrupt, APPROVE_TURN,
+                                               approval_handler=_raising_handler)
+            state = self._checkpointed(react_engine, excinfo.value)
+        assert excinfo.value.request.tool == "send_email"
+        assert state["granted"] == [["ext", "fetch"]]
 
 
 # --------------------------- turn-scoped grants (issue #6) ---------------------------
@@ -835,9 +937,8 @@ class TestResumeAgent:
 # --------------------------- pipeline threading ---------------------------
 
 class TestHandlerThreading:
-    def test_react_loop_passes_handler_to_gateway(self):
-        # The loops stay security-ignorant: they pass the handler through to the
-        # gateway untouched. Patch the gateway factory and inspect the kwargs.
+    def _react_gateway_handler(self, approval_handler):
+        """Run one final-answer ReAct turn; return the handler the gateway got."""
         from agentforge.reasoning import react_engine
 
         captured = {}
@@ -857,7 +958,6 @@ class TestHandlerThreading:
 
             return _FakeGw()
 
-        sentinel = MagicMock(name="handler")
         fake_response = _llm_response(json.dumps(
             {"thought": "done", "action": {"type": "final"}, "reply": "hi",
              "store_memory": False, "memory_text": ""}))
@@ -868,9 +968,24 @@ class TestHandlerThreading:
              patch.object(react_engine, "log_token_usage"), \
              patch.object(react_engine, "_get_client") as mock_client:
             mock_client.return_value.chat.completions.create.return_value = fake_response
-            react_engine.react_loop("u", "do something", approval_handler=sentinel)
+            react_engine.react_loop("u", "do something",
+                                    approval_handler=approval_handler)
+        return captured["approval_handler"]
 
-        assert captured["approval_handler"] is sentinel
+    def test_react_loop_handler_delegates_to_the_front_end(self):
+        # The loop stays security-ignorant: the gateway's handler is a thin
+        # bridge (Step 21.1) that hands every request to the front-end's
+        # handler and returns its decision unchanged.
+        sentinel = MagicMock(name="handler", return_value=APPROVE_TURN)
+        gw_handler = self._react_gateway_handler(sentinel)
+        request = ApprovalRequest("fetch", "ext", {"url": "http://x.com"})
+        assert gw_handler(request) == APPROVE_TURN
+        sentinel.assert_called_once_with(request)
+
+    def test_react_loop_without_handler_keeps_gateway_default_deny(self):
+        # None must reach the gateway as None, so it denies by default and
+        # audits "no approval handler configured" (not a bridge decision).
+        assert self._react_gateway_handler(None) is None
 
     def test_act_loop_passes_handler_to_gateway(self):
         from agentforge import tools as tools_pkg

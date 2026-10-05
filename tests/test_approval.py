@@ -784,6 +784,16 @@ class TestActResume:
 # --------------------------- main.resume_agent dispatch ---------------------------
 
 class TestResumeAgent:
+    @pytest.fixture(autouse=True)
+    def _output_guardrail_off(self, monkeypatch):
+        # resume_agent now runs the output guardrail (issue #51). These tests
+        # cover dispatch, JSON parsing and memory storage, not redaction —
+        # which lives in test_output_guardrail.py with the engine pinned. With
+        # the optional [pii] extra installed, GLiNER redacts even "hi" as a
+        # PERSON, so leaving it on would make these tests depend on the local
+        # install.
+        monkeypatch.setattr("agentforge.main.AGENT_OUTPUT_GUARDRAIL_ENABLED", False)
+
     def _interrupt(self, pipeline, **extra):
         exc = ApprovalRequired(ApprovalRequest("fetch", "ext", {"url": "http://x.com"}))
         exc.continuation = {"pipeline": pipeline, "user_id": "u1",

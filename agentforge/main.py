@@ -31,6 +31,7 @@ from agentforge.rag.qa import answer_from_docs
 from agentforge.logger import log_event, generate_trace_id, Span, log_token_usage
 from agentforge.reasoning.react_engine import react_loop, resume_react_loop
 from agentforge.conversation import trim_history, compact_history, count_tokens
+from agentforge.reply import reply_text
 
 _client = None  # created on first API call, not at import time
 
@@ -265,7 +266,7 @@ def run_agent(
                 log_event("trace_end", {"intent": intent, "error": True}, trace_id=tid)
                 return "Agent error: invalid tool response."
 
-            reply = tool_output.get("reply", "")
+            reply = reply_text(tool_output.get("reply"), source="act", trace_id=tid)
             store = tool_output.get("store_memory", False)
             memory_text = tool_output.get("memory_text", "")
             span.payload = {"reply_length": len(reply)}
@@ -369,7 +370,7 @@ def resume_agent(interrupt, decision, approval_handler=None) -> str:
                 log_event("trace_end", {"intent": "ACT", "resumed": True, "error": True},
                           trace_id=tid)
                 return "Agent error: invalid tool response."
-            reply = parsed.get("reply", "")
+            reply = reply_text(parsed.get("reply"), source="act_resume", trace_id=tid)
             span.payload = {"reply_length": len(reply)}
         if parsed.get("store_memory") and parsed.get("memory_text"):
             store_memory(cont["user_id"], parsed["memory_text"])

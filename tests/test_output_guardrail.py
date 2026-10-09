@@ -104,6 +104,39 @@ class TestRunAgentOutputGuardrail:
         assert "ceo@corp.com" not in out
         assert "[REDACTED_EMAIL]" in out
 
+    @patch("agentforge.main.run_llm_with_tools")
+    @patch("agentforge.main.classify_intent")
+    @patch("agentforge.main.guardrail.scan_external_text")
+    def test_act_object_reply_is_text_and_redacted(self, mock_in_scan, mock_classify,
+                                                   mock_tools):
+        # Issue #49: a dict `reply` used to skip _scan_output (non-string) and
+        # reach the user unredacted. Normalized to text, the guardrail sees it.
+        mock_in_scan.return_value = guardrail.GuardrailResult(guardrail.Verdict.ALLOW)
+        mock_classify.return_value = {"intent": "ACT", "memory_candidate": "", "reason": "tool"}
+        mock_tools.return_value = json.dumps(
+            {"reply": {"contact": "ceo@corp.com", "steps": ["send it"]},
+             "store_memory": False}
+        )
+        out = run_agent("u1", "s1", "who do I email the report to?")
+        assert isinstance(out, str)
+        assert "ceo@corp.com" not in out
+        assert "[REDACTED_EMAIL]" in out
+        assert "send it" in out                      # content kept, not dropped
+
+    @patch("agentforge.main.log_event")
+    @patch("agentforge.main.resume_tool_loop")
+    def test_act_resume_object_reply_is_text(self, mock_resume, mock_log):
+        from agentforge.approval import ApprovalRequest, ApprovalRequired
+        from agentforge.main import resume_agent
+
+        exc = ApprovalRequired(ApprovalRequest("fetch", "ext", {"url": "http://x.com"}))
+        exc.continuation = {"pipeline": "act", "user_id": "u1", "trace_id": "t1"}
+        mock_resume.return_value = json.dumps(
+            {"reply": {"steps": ["send it"]}, "store_memory": False})
+        out = resume_agent(exc, True)
+        assert isinstance(out, str)
+        assert "send it" in out
+
     @patch("agentforge.main.AGENT_OUTPUT_GUARDRAIL_ENABLED", False)
     @patch("agentforge.main.run_llm_with_tools")
     @patch("agentforge.main.classify_intent")

@@ -139,7 +139,8 @@ def _scan_output(text, trace_id: str = None):
 
     No-op when disabled or the text is empty. On redaction, logs the PII TYPES + count
     (never the values — that would re-leak the PII into the log) and returns the
-    redacted text. Applied to run_agent's NON-streaming string returns; scanning
+    redacted text. Applied to the NON-streaming string returns of run_agent and
+    resume_agent (a resumed turn is the same turn — issue #51); scanning
     streamed output can't un-send tokens and is a documented follow-up.
     """
     if not AGENT_OUTPUT_GUARDRAIL_ENABLED or not isinstance(text, str) or not text:
@@ -355,7 +356,7 @@ def resume_agent(interrupt, decision, approval_handler=None) -> str:
                                        approval_handler=approval_handler)
             span.payload = {"reply_length": len(result)}
         log_event("trace_end", {"intent": "REACT", "resumed": True}, trace_id=tid)
-        return result
+        return _scan_output(result, tid)
 
     if cont["pipeline"] == "act":
         # Same post-processing contract as run_agent's ACT branch: the loop
@@ -375,7 +376,7 @@ def resume_agent(interrupt, decision, approval_handler=None) -> str:
         if parsed.get("store_memory") and parsed.get("memory_text"):
             store_memory(cont["user_id"], parsed["memory_text"])
         log_event("trace_end", {"intent": "ACT", "resumed": True}, trace_id=tid)
-        return reply
+        return _scan_output(reply, tid)
 
     raise ValueError(f"Unknown pipeline in continuation: {cont['pipeline']!r}")
 

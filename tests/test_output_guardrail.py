@@ -151,6 +151,55 @@ class TestRunAgentOutputGuardrail:
         assert "ceo@corp.com" in out  # guardrail off -> not redacted
 
 
+class TestResumeAgentOutputGuardrail:
+    """Issue #51: a turn resumed after an approval is the same turn, so its
+    reply gets the same output guardrail as run_agent's. These are the turns
+    that called gated tools (e.g. fetch over untrusted web content)."""
+
+    @staticmethod
+    def _interrupt(pipeline):
+        from agentforge.approval import ApprovalRequest, ApprovalRequired
+        exc = ApprovalRequired(ApprovalRequest("fetch", "ext", {"url": "http://x.com"}))
+        exc.continuation = {"pipeline": pipeline, "user_id": "u1", "trace_id": "t1"}
+        return exc
+
+    @patch("agentforge.main.resume_tool_loop")
+    def test_resumed_act_reply_pii_is_redacted(self, mock_resume):
+        from agentforge.main import resume_agent
+        mock_resume.return_value = json.dumps(
+            {"reply": "Email the report to ceo@corp.com.", "store_memory": False})
+        out = resume_agent(self._interrupt("act"), True)
+        assert "ceo@corp.com" not in out
+        assert "[REDACTED_EMAIL]" in out
+
+    @patch("agentforge.main.resume_react_loop")
+    def test_resumed_react_reply_pii_is_redacted(self, mock_resume):
+        from agentforge.main import resume_agent
+        mock_resume.return_value = "Email the report to ceo@corp.com."
+        out = resume_agent(self._interrupt("react"), True)
+        assert "ceo@corp.com" not in out
+        assert "[REDACTED_EMAIL]" in out
+
+    @patch("agentforge.main.log_event")
+    @patch("agentforge.main.resume_react_loop")
+    def test_resumed_redaction_is_logged_on_the_turn_trace(self, mock_resume, mock_log):
+        from agentforge.main import resume_agent
+        mock_resume.return_value = "SSN 123-45-6789 on file."
+        resume_agent(self._interrupt("react"), True)
+        redactions = [c for c in mock_log.call_args_list
+                      if c.args[0] == "output_guardrail_redacted"]
+        assert len(redactions) == 1
+        assert redactions[0].kwargs["trace_id"] == "t1"   # same trace as the turn
+        assert "123-45-6789" not in json.dumps(redactions[0].args[1])
+
+    @patch("agentforge.main.AGENT_OUTPUT_GUARDRAIL_ENABLED", False)
+    @patch("agentforge.main.resume_react_loop")
+    def test_resumed_disabled_passes_through(self, mock_resume):
+        from agentforge.main import resume_agent
+        mock_resume.return_value = "Email ceo@corp.com."
+        assert "ceo@corp.com" in resume_agent(self._interrupt("react"), True)
+
+
 # --------------------- structured scanning (Step 21b.1) ---------------------
 
 class TestScanStructured:

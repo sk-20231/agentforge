@@ -836,8 +836,11 @@ class TestActResume:
             interrupt = excinfo.value
             cont = interrupt.continuation
             assert cont["pipeline"] == "act"
-            assert cont["pending_index"] == 0
             assert cont["user_id"] == "u1"
+            state = self._checkpointed(tools_pkg, interrupt)
+            assert state["index"] == 0                    # paused on the first call
+            assert state["tool_calls"] == [{"id": "tc1", "name": "fetch",
+                                            "arguments": '{"url": "http://8.8.8.8/p"}'}]
             session.call_tool.assert_not_called()
 
             result = tools_pkg.resume_tool_loop(interrupt, True,
@@ -846,9 +849,15 @@ class TestActResume:
         session.call_tool.assert_called_once_with("fetch", {"url": "http://8.8.8.8/p"})
         assert json.loads(result)["reply"] == "Here is the page summary"
 
+    @staticmethod
+    def _checkpointed(tools_pkg, interrupt):
+        """The paused ACT turn's state, read from the checkpointer (Step 21.1)."""
+        config = {"configurable": {"thread_id": interrupt.continuation["thread_id"]}}
+        return tools_pkg._act_graph().get_state(config).values
+
     def test_act_interrupt_freezes_routed_model(self):
-        # Step 28 (symmetric to the REACT case): the routed model is frozen in the
-        # ACT continuation so the resumed follow-up call stays on the routed tier.
+        # Step 28 (symmetric to the REACT case): the routed model is checkpointed
+        # so the resumed follow-up call stays on the routed tier.
         session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
         tool_call = _make_openai_tool_call("fetch", json.dumps({"url": "http://8.8.8.8/p"}))
         with contextlib.ExitStack() as stack:
@@ -859,7 +868,108 @@ class TestActResume:
                 tools_pkg.run_llm_with_tools("u1", "fetch the page",
                                              approval_handler=_raising_handler,
                                              model="frontier-model")
-        assert excinfo.value.continuation["model"] == "frontier-model"
+            state = self._checkpointed(tools_pkg, excinfo.value)
+        assert state["model"] == "frontier-model"
+
+    def _two_fetches(self):
+        return [
+            _make_openai_tool_call("fetch", json.dumps({"url": "http://8.8.8.8/a"}), "tc1"),
+            _make_openai_tool_call("fetch", json.dumps({"url": "http://9.9.9.9/b"}), "tc2"),
+        ]
+
+    def test_finished_call_is_not_rerun_after_a_later_pause(self):
+        """The reason dispatch handles ONE call per graph step. Two gated calls
+        in one response pause twice. LangGraph re-runs a paused node from the
+        top, so if one node looped over both calls, the second resume would
+        run the first (already finished) call again."""
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        with contextlib.ExitStack() as stack:
+            tools_pkg, client = self._act_env(stack, session, [
+                _llm_response(None, tool_calls=self._two_fetches()),
+                _llm_response(_ACT_FOLLOWUP_JSON),
+            ])
+            with pytest.raises(ApprovalRequired) as first:
+                tools_pkg.run_llm_with_tools("u1", "fetch both",
+                                             approval_handler=_raising_handler)
+            assert first.value.request.arguments == {"url": "http://8.8.8.8/a"}
+            with pytest.raises(ApprovalRequired) as second:
+                tools_pkg.resume_tool_loop(first.value, True,
+                                           approval_handler=_raising_handler)
+            assert second.value.request.arguments == {"url": "http://9.9.9.9/b"}
+            assert self._checkpointed(tools_pkg, second.value)["index"] == 1
+            result = tools_pkg.resume_tool_loop(second.value, True,
+                                                approval_handler=_raising_handler)
+
+        dispatched = [c.args for c in session.call_tool.await_args_list]
+        assert dispatched == [("fetch", {"url": "http://8.8.8.8/a"}),
+                              ("fetch", {"url": "http://9.9.9.9/b"})]   # each once
+        assert client.chat.completions.create.call_count == 2         # no LLM re-run
+        followup_messages = client.chat.completions.create.call_args.kwargs["messages"]
+        tool_ids = [m["tool_call_id"] for m in followup_messages if m.get("role") == "tool"]
+        assert tool_ids == ["tc1", "tc2"]
+        assert json.loads(result)["reply"] == "Here is the page summary"
+
+    def test_approve_turn_covers_the_second_call_in_the_same_response(self):
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        with contextlib.ExitStack() as stack:
+            tools_pkg, _ = self._act_env(stack, session, [
+                _llm_response(None, tool_calls=self._two_fetches()),
+                _llm_response(_ACT_FOLLOWUP_JSON),
+            ])
+            with pytest.raises(ApprovalRequired) as first:
+                tools_pkg.run_llm_with_tools("u1", "fetch both",
+                                             approval_handler=_raising_handler)
+            result = tools_pkg.resume_tool_loop(first.value, APPROVE_TURN,
+                                                approval_handler=_raising_handler)
+        assert session.call_tool.await_count == 2          # one card, both fetched
+        assert json.loads(result)["reply"] == "Here is the page summary"
+
+    def test_act_second_resume_of_the_same_interrupt_is_refused(self):
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        tool_call = _make_openai_tool_call("fetch", json.dumps({"url": "http://8.8.8.8/p"}))
+        with contextlib.ExitStack() as stack:
+            tools_pkg, _ = self._act_env(stack, session, [
+                _llm_response(None, tool_calls=[tool_call]),
+                _llm_response(_ACT_FOLLOWUP_JSON),
+            ])
+            with pytest.raises(ApprovalRequired) as excinfo:
+                tools_pkg.run_llm_with_tools("u1", "fetch the page",
+                                             approval_handler=_raising_handler)
+            tools_pkg.resume_tool_loop(excinfo.value, True,
+                                       approval_handler=_raising_handler)
+            assert self._checkpointed(tools_pkg, excinfo.value) == {}   # cleaned up
+            with pytest.raises(ValueError):
+                tools_pkg.resume_tool_loop(excinfo.value, True,
+                                           approval_handler=_raising_handler)
+        session.call_tool.assert_called_once()
+
+    def test_act_blocking_handler_answers_without_pausing(self):
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        with contextlib.ExitStack() as stack:
+            tools_pkg, _ = self._act_env(stack, session, [
+                _llm_response(None, tool_calls=self._two_fetches()),
+                _llm_response(_ACT_FOLLOWUP_JSON),
+            ])
+            result = tools_pkg.run_llm_with_tools("u1", "fetch both",
+                                                  approval_handler=lambda r: True)
+        assert session.call_tool.await_count == 2
+        assert json.loads(result)["reply"] == "Here is the page summary"
+
+    def test_many_tool_calls_are_not_cut_off_by_graph_recursion_limit(self):
+        """Graph steps = tool calls + 2. LangGraph's default recursion limit
+        (25) would raise GraphRecursionError above 23 calls."""
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        calls = [_make_openai_tool_call("fetch", json.dumps({"url": f"http://8.8.8.8/{i}"}),
+                                        f"tc{i}") for i in range(30)]
+        with contextlib.ExitStack() as stack:
+            tools_pkg, _ = self._act_env(stack, session, [
+                _llm_response(None, tool_calls=calls),
+                _llm_response(_ACT_FOLLOWUP_JSON),
+            ])
+            result = tools_pkg.run_llm_with_tools("u1", "fetch all",
+                                                  approval_handler=lambda r: True)
+        assert session.call_tool.await_count == 30
+        assert json.loads(result)["reply"] == "Here is the page summary"
 
     def test_act_resume_deny_still_answers(self):
         session = _make_session_mock([_make_mcp_tool("fetch")])
@@ -987,7 +1097,20 @@ class TestHandlerThreading:
         # audits "no approval handler configured" (not a bridge decision).
         assert self._react_gateway_handler(None) is None
 
-    def test_act_loop_passes_handler_to_gateway(self):
+    def test_act_loop_handler_delegates_to_the_front_end(self):
+        # Same bridge as REACT (Step 21.1): the gateway's handler hands every
+        # request to the front-end's handler and returns its decision unchanged.
+        sentinel = MagicMock(name="handler", return_value=APPROVE_TURN)
+        gw_handler = self._act_gateway_handler(sentinel)
+        request = ApprovalRequest("fetch", "ext", {"url": "http://x.com"})
+        assert gw_handler(request) == APPROVE_TURN
+        sentinel.assert_called_once_with(request)
+
+    def test_act_loop_without_handler_keeps_gateway_default_deny(self):
+        assert self._act_gateway_handler(None) is None
+
+    def _act_gateway_handler(self, approval_handler):
+        """Run one ACT turn with no tools; return the handler the gateway got."""
         from agentforge import tools as tools_pkg
 
         captured = {}
@@ -1008,10 +1131,8 @@ class TestHandlerThreading:
 
             return _FakeGw()
 
-        sentinel = MagicMock(name="handler")
         with patch.object(tools_pkg, "mcp_gateway", fake_gateway), \
              patch.object(tools_pkg, "get_relevant_memories", return_value=""), \
              patch.object(tools_pkg, "log_event"):
-            tools_pkg.run_llm_with_tools("u", "weather?", approval_handler=sentinel)
-
-        assert captured["approval_handler"] is sentinel
+            tools_pkg.run_llm_with_tools("u", "weather?", approval_handler=approval_handler)
+        return captured["approval_handler"]

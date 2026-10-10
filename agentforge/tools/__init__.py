@@ -14,15 +14,19 @@ delegate to them. The agent itself imports none of them as callable tools.
 import asyncio
 import json
 import logging
+import uuid
+from dataclasses import dataclass
+from typing import Any, Optional, TypedDict
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.runtime import Runtime
+from langgraph.types import Command
 
 from openai import OpenAI
 
-from agentforge.approval import (
-    ApprovalRequired,
-    make_resume_handler,
-    run_interruptible,
-)
+from agentforge.approval import ApprovalRequired, run_interruptible
 from agentforge.config import OPENAI_BASE_URL, OPENAI_MODEL
+from agentforge.hitl_graph import CHECKPOINTER, GraphApprovalHandler, pending_state, run_graph
 from agentforge.logger import log_event, log_token_usage
 from agentforge.mcp_client import mcp_gateway
 from agentforge.memory.semantic import get_relevant_memories
@@ -133,119 +137,154 @@ def prime_tool_catalog(force: bool = False) -> list:
     return _TOOL_CATALOG_CACHE
 
 
-async def _run_tool_loop(messages: list, trace_id: str = None, approval_handler=None,
-                         user_id: str = "", model: str = None) -> str:
-    """Open the shared MCP gateway, then run the single-pick ACT tool loop.
+# -------------------- ACT GRAPH (Step 21.1) --------------------
+#
+#     START -> pick --(tool calls)--> dispatch --(calls left)--> dispatch
+#               |                         +------(all done)----> followup -> END
+#               +--(no tools / error / no tool calls)--> END
+#
+# ``pick`` and ``followup`` are the LLM calls; they never pause. ``dispatch``
+# runs exactly ONE tool call per graph step and can pause on it. LangGraph
+# saves state only BETWEEN nodes and re-runs a paused node from its first line,
+# so each finished call (its tool message and the advanced index) is saved
+# before the next call can pause. A resume re-runs only the paused call. A loop
+# over all calls inside ONE node would re-run every earlier call on each later
+# resume — with two gated calls, the first tool would run twice.
 
-    ACT is MCP-only (Step 17c.1): every tool is discovered from the gateway; there
-    is no in-process dispatch. The gateway holds one session per server open for
-    the whole turn, so the model's tool call and the follow-up share connections.
+_NO_TOOLS_REPLY = json.dumps({
+    "reply": "I don't have any tools available right now to do that. Please try again shortly.",
+    "store_memory": False,
+    "memory_text": "",
+})
+_SERVICE_ERROR_REPLY = json.dumps({
+    "reply": "I couldn't complete that request due to a service error. Please try again.",
+    "store_memory": False,
+    "memory_text": "",
+})
+_FOLLOWUP_ERROR_REPLY = json.dumps({
+    "reply": "I ran into an error after using the tool. Please try again.",
+    "store_memory": False,
+    "memory_text": "",
+})
 
-    ``approval_handler`` is the front-end's human-in-the-loop callback (Step 17f),
-    passed through untouched — the gate lives in the gateway, and this loop stays
-    security-ignorant. If the handler raises ApprovalRequired it propagates out of
-    this loop by design (the front-end catches it and replays the turn).
+# Graph steps per turn = tool calls + 2 (pick, followup). ``index`` strictly
+# increases, so the graph cannot loop forever; LangGraph's default limit (25)
+# would only cut off a response with more than 23 tool calls.
+_ACT_RECURSION_LIMIT = 256
+
+
+class _ActState(TypedDict):
+    """Checkpointed turn state. Plain data only — the checkpointer serializes
+    it. Live objects (the gateway) travel in ``_ActContext`` instead."""
+    user_id: str
+    messages: list
+    model: Optional[str]      # routed model (Step 28) — survives a resume
+    trace_id: Optional[str]   # issue #7 — the resumed half logs on the same trace
+    tool_calls: list          # [{"id", "name", "arguments"}] — not SDK objects
+    index: int                # next tool call to dispatch
+    tool_messages: list       # one role:"tool" message per finished call
+    granted: list             # APPROVE_TURN grants as [server, tool] pairs (issue #6)
+    output: Optional[str]     # the loop's JSON-string result
+
+
+@dataclass
+class _ActContext:
+    """Per-invocation, never-checkpointed dependencies for the nodes."""
+    gw: Any
+
+
+async def _pick_node(state: _ActState, runtime: Runtime[_ActContext]) -> dict:
+    """First LLM call: the model must pick one or more tools.
+
+    Never pauses. Converts the SDK's tool-call objects to plain dicts so the
+    checkpointer can save them, or ends the turn early (sets ``output``).
     """
-    async with mcp_gateway(trace_id, approval_handler=approval_handler) as gw:
+    gw = runtime.context.gw
+    trace_id = state["trace_id"]
 
-        # ---- 1. ACT is MCP-only: tools come entirely from discovery ----
-        if not gw.has_tools:
-            # No MCP tools discovered (all servers down / misconfigured). With
-            # tool_choice="required" and an empty tool list the API would error,
-            # so bail out gracefully instead of crashing the turn.
-            log_event("act_no_tools_available", {}, trace_id=trace_id)
-            return json.dumps({
-                "reply": "I don't have any tools available right now to do that. Please try again shortly.",
-                "store_memory": False,
-                "memory_text": "",
-            })
+    # ACT is MCP-only: tools come entirely from discovery.
+    if not gw.has_tools:
+        # No MCP tools discovered (all servers down / misconfigured). With
+        # tool_choice="required" and an empty tool list the API would error,
+        # so bail out gracefully instead of crashing the turn.
+        log_event("act_no_tools_available", {}, trace_id=trace_id)
+        return {"output": _NO_TOOLS_REPLY}
 
-        # ---- 2. First LLM call: let the model pick a tool ----
-        try:
-            response = _get_client().chat.completions.create(
-                model=model or OPENAI_MODEL,
-                messages=messages,
-                tools=gw.openai_schemas,
-                tool_choice="required",
-            )
-            log_token_usage(response, "act_tool_call", trace_id=trace_id)
-        except Exception:
-            return json.dumps({
-                "reply": "I couldn't complete that request due to a service error. Please try again.",
-                "store_memory": False,
-                "memory_text": "",
-            })
+    try:
+        response = _get_client().chat.completions.create(
+            model=state["model"] or OPENAI_MODEL,
+            messages=state["messages"],
+            tools=gw.openai_schemas,
+            tool_choice="required",
+        )
+        log_token_usage(response, "act_tool_call", trace_id=trace_id)
+    except Exception as e:
+        logger.error("act: tool-pick LLM call failed: %s", e, exc_info=True)
+        return {"output": _SERVICE_ERROR_REPLY}
 
-        message = response.choices[0].message
-        if not message.tool_calls:
-            return message.content
+    message = response.choices[0].message
+    if not message.tool_calls:
+        return {"output": message.content}
 
-        # ---- 3 + 4. Dispatch the tool calls, then the follow-up LLM call ----
-        return await _dispatch_and_followup(
-            gw, messages, message.tool_calls, [], 0, trace_id, user_id, model=model)
+    calls = [{"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments}
+             for tc in message.tool_calls]
+    # Tool NAMES only — arguments can hold user data (Step 17e gap A).
+    log_event("act_tools_picked", {"tools": [c["name"] for c in calls]},
+              trace_id=trace_id)
+    return {"tool_calls": calls, "index": 0}
 
 
-async def _dispatch_and_followup(gw, messages: list, tool_calls, tool_messages: list,
-                                 start_index: int, trace_id: str, user_id: str,
-                                 model: str = None) -> str:
-    """Dispatch ``tool_calls[start_index:]`` and run the follow-up LLM call.
+async def _dispatch_node(state: _ActState, runtime: Runtime[_ActContext]) -> dict:
+    """Run the ONE tool call at ``index`` through the MCP gateway.
 
-    Shared by the fresh ACT path (``start_index=0``) and the resume path (which
-    passes the interrupted call's index and the tool messages gathered before
-    the interrupt). gw.call handles unknown/hallucinated tool names by returning
-    a readable error string (it does not raise) — same recoverable-observation
-    contract the loop already relies on.
+    This node can PAUSE: the gateway's approval gate may call ``interrupt()``.
+    On resume LangGraph re-runs it from the top, so everything before
+    ``gw.call`` reads checkpointed state only — the re-run reaches the same
+    approval request, and earlier calls are already saved, never repeated.
+    gw.call handles unknown/hallucinated tool names by returning a readable
+    error string (it does not raise) — a recoverable observation.
     """
-    for i in range(start_index, len(tool_calls)):
-        tool_call = tool_calls[i]
-        tool_name = tool_call.function.name
-        try:
-            arguments = json.loads(tool_call.function.arguments)
-        except json.JSONDecodeError:
-            tool_messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": "Error: Tool arguments were invalid.",
-            })
-            continue
+    gw = runtime.context.gw
+    index = state["index"]
+    call = state["tool_calls"][index]
+    # Turn-scoped grants (issue #6) live in checkpointed state; the gateway
+    # is rebuilt on resume, so seed it here and write it back below.
+    gw.granted.update(tuple(g) for g in state["granted"])
 
-        try:
-            tool_result = await gw.call(tool_name, arguments)
-        except ApprovalRequired as exc:
-            # CHECKPOINT (Step 17f): freeze this loop's state on the exception
-            # so resume_tool_loop can finish the turn after the human decides.
-            # The loop, not the gateway, owns the loop state.
-            exc.continuation = {
-                "pipeline": "act",
-                "user_id": user_id,
-                "messages": messages,
-                "tool_calls": tool_calls,
-                "tool_messages": list(tool_messages),
-                "pending_index": i,
-                "trace_id": trace_id,
-                # Issue #6: the turn's approval-grant set rides in the
-                # continuation so "allow for the rest of this turn" survives
-                # interrupt→resume and dies with the turn.
-                "granted": gw.granted,
-                # Step 28: freeze the routed model so the resumed follow-up call
-                # uses the same tier the turn was routed to, not the default.
-                "model": model,
-            }
-            raise
-        tool_messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": tool_result,
-        })
+    try:
+        arguments = json.loads(call["arguments"])
+    except json.JSONDecodeError:
+        logger.warning("act: tool call %d (%s) had invalid JSON arguments",
+                       index, call["name"])
+        content = "Error: Tool arguments were invalid."
+    else:
+        content = await gw.call(call["name"], arguments)
 
-    # ---- Follow-up LLM call: turn tool results into a final answer ----
+    return {
+        "tool_messages": [*state["tool_messages"],
+                          {"role": "tool", "tool_call_id": call["id"], "content": content}],
+        "index": index + 1,
+        "granted": sorted([list(g) for g in gw.granted]),
+    }
+
+
+async def _followup_node(state: _ActState) -> dict:
+    """Second LLM call: turn the tool results into the final JSON answer.
+    Never pauses."""
+    trace_id = state["trace_id"]
+    assistant = {
+        "role": "assistant",
+        "tool_calls": [{"id": c["id"], "type": "function",
+                        "function": {"name": c["name"], "arguments": c["arguments"]}}
+                       for c in state["tool_calls"]],
+    }
     try:
         followup = _get_client().chat.completions.create(
-            model=model or OPENAI_MODEL,
+            model=state["model"] or OPENAI_MODEL,
             messages=[
-                *messages,
-                {"role": "assistant", "tool_calls": tool_calls},
-                *tool_messages,
+                *state["messages"],
+                assistant,
+                *state["tool_messages"],
                 {
                     "role": "system",
                     "content": (
@@ -258,38 +297,103 @@ async def _dispatch_and_followup(gw, messages: list, tool_calls, tool_messages: 
             ],
         )
         log_token_usage(followup, "act_tool_followup", trace_id=trace_id)
-        return followup.choices[0].message.content
-    except Exception:
-        return json.dumps({
-            "reply": "I ran into an error after using the tool. Please try again.",
-            "store_memory": False,
-            "memory_text": "",
-        })
+        return {"output": followup.choices[0].message.content}
+    except Exception as e:
+        logger.error("act: follow-up LLM call failed: %s", e, exc_info=True)
+        return {"output": _FOLLOWUP_ERROR_REPLY}
 
 
-async def _resume_tool_loop_async(interrupt: ApprovalRequired, decision,
+def _route_after_pick(state: _ActState) -> str:
+    """Tool calls go to dispatch; an early ``output`` ends the turn."""
+    return "dispatch" if state["tool_calls"] else END
+
+
+def _route_after_dispatch(state: _ActState) -> str:
+    """One more dispatch per remaining call, then the follow-up."""
+    return "dispatch" if state["index"] < len(state["tool_calls"]) else "followup"
+
+
+_ACT_GRAPH = None
+
+
+def _act_graph():
+    """The compiled ACT graph (built once, on first use)."""
+    global _ACT_GRAPH
+    if _ACT_GRAPH is None:
+        builder = StateGraph(_ActState, context_schema=_ActContext)
+        builder.add_node("pick", _pick_node)
+        builder.add_node("dispatch", _dispatch_node)
+        builder.add_node("followup", _followup_node)
+        builder.add_edge(START, "pick")
+        builder.add_conditional_edges("pick", _route_after_pick, ["dispatch", END])
+        builder.add_conditional_edges("dispatch", _route_after_dispatch,
+                                      ["dispatch", "followup"])
+        builder.add_edge("followup", END)
+        _ACT_GRAPH = builder.compile(checkpointer=CHECKPOINTER)
+    return _ACT_GRAPH
+
+
+async def _run_act(graph_input, thread_id: str, gw, user_id: str,
+                   trace_id: Optional[str]) -> str:
+    return await run_graph(
+        _act_graph(), graph_input, thread_id=thread_id,
+        recursion_limit=_ACT_RECURSION_LIMIT, context=_ActContext(gw=gw),
+        pipeline="act", user_id=user_id, trace_id=trace_id,
+        output_key="output", progress_key="index")
+
+
+async def _run_tool_loop(messages: list, trace_id: str = None, approval_handler=None,
+                         user_id: str = "", model: str = None) -> str:
+    """Open the shared MCP gateway, then run the ACT graph.
+
+    ACT is MCP-only (Step 17c.1): every tool is discovered from the gateway; there
+    is no in-process dispatch. The gateway holds one session per server open for
+    the whole turn, around the graph, so the tool calls and the follow-up share
+    connections.
+
+    ``approval_handler`` is the front-end's human-in-the-loop callback (Step 17f).
+    The gate lives in the gateway, and this loop stays security-ignorant; the
+    handler reaches the gateway through the LangGraph bridge, so a handler that
+    cannot answer synchronously pauses the graph (surfaced as ApprovalRequired).
+    """
+    # No front-end handler -> pass None, so the gateway denies by default and
+    # audits it as "no approval handler configured".
+    handler = (GraphApprovalHandler(approval_handler)
+               if approval_handler is not None else None)
+    async with mcp_gateway(trace_id, approval_handler=handler) as gw:
+        initial = {
+            "user_id": user_id, "messages": messages, "model": model,
+            "trace_id": trace_id, "tool_calls": [], "index": 0,
+            "tool_messages": [], "granted": [], "output": None,
+        }
+        return await _run_act(initial, uuid.uuid4().hex, gw, user_id, trace_id)
+
+
+async def _resume_tool_loop_async(interrupt_exc: ApprovalRequired, decision,
                                   fallback=None) -> str:
-    """Re-enter an interrupted ACT turn mid-flight (Step 17f resume).
+    """Resume a paused ACT graph with the human's decision (Step 17f / 21.1).
 
     Opens a fresh gateway (the original's server subprocesses died when the
-    interrupt unwound the turn), settles the STORED pending call with the
-    human's decision via a one-shot handler, then finishes the remaining tool
-    calls and the follow-up. Later gated calls go to ``fallback`` and can
-    interrupt again.
+    interrupt unwound the turn) and resumes the checkpointed thread with
+    ``Command(resume=decision)``. LangGraph re-runs ``dispatch`` for the paused
+    call only; the remaining calls and the follow-up continue from there.
+    Later gated calls go to ``fallback`` and can pause again.
     """
-    cont = interrupt.continuation
-    handler = make_resume_handler(decision, interrupt.request, fallback)
+    cont = interrupt_exc.continuation
+    trace_id = cont.get("trace_id")
+    thread_id = cont["thread_id"]
+    values = await pending_state(_act_graph(), thread_id, "act", trace_id)
     log_event("act_resume", {
-        "tool": interrupt.request.tool,
+        "thread_id": thread_id,
+        "index": values.get("index"),
+        "tool": interrupt_exc.request.tool,
         "decision": "approved" if decision else "denied",
-    }, trace_id=cont["trace_id"])
+    }, trace_id=trace_id)
 
-    async with mcp_gateway(cont["trace_id"], approval_handler=handler,
-                           granted=cont.get("granted")) as gw:
-        return await _dispatch_and_followup(
-            gw, cont["messages"], cont["tool_calls"], cont["tool_messages"],
-            cont["pending_index"], cont["trace_id"], cont["user_id"],
-            model=cont.get("model"))
+    handler = GraphApprovalHandler(fallback, resuming=True)
+    async with mcp_gateway(trace_id, approval_handler=handler) as gw:
+        return await _run_act(Command(resume=decision), thread_id, gw,
+                              cont["user_id"], trace_id)
 
 
 # -------------------- MAIN ENTRY --------------------
@@ -313,12 +417,13 @@ def resume_tool_loop(interrupt: ApprovalRequired, decision,
     """Resume an ACT turn that was interrupted for human approval (Step 17f).
 
     ``interrupt`` is the ApprovalRequired the front-end caught — its
-    ``continuation`` holds the frozen loop state. ``decision`` is the human's
-    Deny (False) / Allow once (True) / APPROVE_TURN (allow this tool for the
-    rest of the turn — issue #6) for the stored pending call. Resume — not
-    replay — so the decision settles the EXACT call the human looked at; the
-    LLM is never asked to regenerate it. Returns the same JSON-string contract
-    as ``run_llm_with_tools`` (main.resume_agent parses it).
+    ``continuation`` carries the ``thread_id`` of the paused graph (Step 21.1).
+    ``decision`` is the human's Deny (False) / Allow once (True) / APPROVE_TURN
+    (allow this tool for the rest of the turn — issue #6) for the stored
+    pending call. Resume — not replay — so the decision settles the EXACT call
+    the human looked at; the LLM is never asked to regenerate it. Returns the
+    same JSON-string contract as ``run_llm_with_tools`` (main.resume_agent
+    parses it).
     """
     return run_interruptible(
         _resume_tool_loop_async(interrupt, decision, approval_handler))

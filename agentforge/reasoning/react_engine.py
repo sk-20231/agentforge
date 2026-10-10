@@ -6,17 +6,12 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Optional, TypedDict
 
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
-from langgraph.types import Command, interrupt
+from langgraph.types import Command
 from openai import OpenAI
 
-from agentforge.approval import (
-    ApprovalRequest,
-    ApprovalRequired,
-    run_interruptible,
-)
+from agentforge.approval import ApprovalRequired, run_interruptible
 from agentforge.config import (
     OPENAI_MODEL,
     OPENAI_BASE_URL,
@@ -31,6 +26,7 @@ from agentforge.prompts import (
     REACT_TOOL_EFFICIENCY,
     SPOTLIGHT_INSTRUCTIONS,
 )
+from agentforge.hitl_graph import CHECKPOINTER, GraphApprovalHandler, pending_state, run_graph
 from agentforge.mcp_client import mcp_gateway
 from agentforge.memory.semantic import get_relevant_memories, store_memory
 from agentforge.output_guardrail import scan_structured
@@ -135,37 +131,6 @@ class _ReactContext:
     gw: Any
 
 
-class _GraphApprovalHandler:
-    """Bridges the front-end's approval contract onto LangGraph ``interrupt()``.
-
-    The gateway calls this like any handler. Fresh run: the front-end handler
-    answers synchronously (CLI) or raises ApprovalRequired (Streamlit, which
-    cannot block) — the latter becomes ``interrupt()``, which pauses the graph
-    and checkpoints it. Resume (``resuming=True``): the first gated call is
-    the re-run of the stored call, so ``interrupt()`` RETURNS the human's
-    decision instead of pausing. Consumed once: any later gated call in the
-    resumed turn goes back to the front-end handler and can pause again.
-    """
-
-    def __init__(self, fallback=None, resuming: bool = False):
-        self.fallback = fallback
-        self.resuming = resuming
-
-    def __call__(self, request: ApprovalRequest):
-        payload = {"tool": request.tool, "server": request.server,
-                   "arguments": request.arguments}
-        if self.resuming:
-            self.resuming = False
-            return interrupt(payload)
-        if self.fallback is None:
-            return False  # no way to ask a human -> deny
-        try:
-            return self.fallback(request)
-        except ApprovalRequired:
-            return interrupt(payload)
-
-
-_CHECKPOINTER = InMemorySaver()
 _GRAPH = None
 
 
@@ -180,15 +145,14 @@ def _graph():
         builder.add_conditional_edges("think", _route_after_think,
                                       ["act", "think", END])
         builder.add_edge("act", "think")
-        _GRAPH = builder.compile(checkpointer=_CHECKPOINTER)
+        _GRAPH = builder.compile(checkpointer=CHECKPOINTER)
     return _GRAPH
 
 
-def _graph_config(thread_id: str, max_steps: int) -> dict:
+def _recursion_limit(max_steps: int) -> int:
     # Each step is up to two graph steps (think + act), plus the final think.
     # LangGraph's default recursion limit (25) would cut off max_steps > 12.
-    return {"configurable": {"thread_id": thread_id},
-            "recursion_limit": 2 * max_steps + 5}
+    return 2 * max_steps + 5
 
 
 async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5,
@@ -212,7 +176,7 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5,
 
     # No front-end handler -> pass None, so the gateway denies by default and
     # audits it as "no approval handler configured".
-    handler = (_GraphApprovalHandler(approval_handler)
+    handler = (GraphApprovalHandler(approval_handler)
                if approval_handler is not None else None)
     async with mcp_gateway(trace_id, approval_handler=handler) as gw:
         # Build the prompt once, injecting the live tool catalog so the model can
@@ -230,8 +194,7 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5,
             "tool_pending": False, "tool_name": None, "tool_input": None,
             "raw": None, "granted": [], "reply": None,
         }
-        return await _run_graph(initial, uuid.uuid4().hex, max_steps, gw,
-                                user_id, trace_id)
+        return await _run(initial, uuid.uuid4().hex, max_steps, gw, user_id, trace_id)
 
 
 async def _react_resume_async(interrupt_exc: ApprovalRequired, decision,
@@ -248,63 +211,27 @@ async def _react_resume_async(interrupt_exc: ApprovalRequired, decision,
     cont = interrupt_exc.continuation
     trace_id = cont.get("trace_id")
     thread_id = cont["thread_id"]
-    snapshot = await _graph().aget_state({"configurable": {"thread_id": thread_id}})
-    if not snapshot.next:
-        # Already resumed (e.g. a double click) or never paused. Refuse rather
-        # than start a turn with no state, and never re-dispatch a settled call.
-        log_event("react_resume_rejected", {"thread_id": thread_id,
-                                            "reason": "no pending interrupt"},
-                  trace_id=trace_id)
-        raise ValueError("This approval is no longer pending and cannot be resumed.")
-
+    values = await pending_state(_graph(), thread_id, "react", trace_id)
     log_event("react_resume", {
         "thread_id": thread_id,
-        "step": snapshot.values.get("step"),
+        "step": values.get("step"),
         "tool": interrupt_exc.request.tool,
         "decision": "approved" if decision else "denied",
     }, trace_id=trace_id)
 
-    handler = _GraphApprovalHandler(fallback, resuming=True)
+    handler = GraphApprovalHandler(fallback, resuming=True)
     async with mcp_gateway(trace_id, approval_handler=handler) as gw:
-        return await _run_graph(Command(resume=decision), thread_id,
-                                snapshot.values["max_steps"], gw,
-                                cont["user_id"], trace_id)
+        return await _run(Command(resume=decision), thread_id, values["max_steps"],
+                          gw, cont["user_id"], trace_id)
 
 
-async def _run_graph(graph_input, thread_id: str, max_steps: int, gw,
-                     user_id: str, trace_id: Optional[str]) -> str:
-    """Invoke (or resume) the graph; translate a pause into ApprovalRequired.
-
-    Until the front-ends move to ``thread_id`` (Step 21.1 task F), a paused
-    graph still surfaces as ApprovalRequired — its continuation now carries
-    only the handle; the turn state lives in the checkpointer. A finished
-    turn's thread is deleted, so the in-memory checkpointer does not grow
-    with every turn.
-    """
-    paused = False
-    try:
-        result = await _graph().ainvoke(
-            graph_input, _graph_config(thread_id, max_steps),
-            context=_ReactContext(gw=gw))
-        pending = result.get("__interrupt__")
-        if pending:
-            paused = True
-            payload = pending[0].value
-            request = ApprovalRequest(tool=payload["tool"], server=payload["server"],
-                                      arguments=payload["arguments"])
-            # Tool NAME only — arguments can hold user data (Step 17e gap A).
-            log_event("react_interrupt", {"thread_id": thread_id,
-                                          "step": result.get("step"),
-                                          "tool": request.tool},
-                      trace_id=trace_id)
-            exc = ApprovalRequired(request)
-            exc.continuation = {"pipeline": "react", "thread_id": thread_id,
-                                "user_id": user_id, "trace_id": trace_id}
-            raise exc
-        return result["reply"]
-    finally:
-        if not paused:
-            await _CHECKPOINTER.adelete_thread(thread_id)
+async def _run(graph_input, thread_id: str, max_steps: int, gw, user_id: str,
+               trace_id: Optional[str]) -> str:
+    return await run_graph(
+        _graph(), graph_input, thread_id=thread_id,
+        recursion_limit=_recursion_limit(max_steps),
+        context=_ReactContext(gw=gw), pipeline="react", user_id=user_id,
+        trace_id=trace_id, output_key="reply", progress_key="step")
 
 
 def _user_question(messages: list) -> str:

@@ -167,9 +167,10 @@ def run_agent(
     # MCP gateway by the ACT and REACT pipelines (the only tool-calling paths).
     # None (the default, and every pre-17f caller) means gated tools are denied
     # with a readable observation rather than silently auto-approved. If the
-    # handler raises ApprovalRequired it propagates out of this function by
-    # design — carrying the pipeline's continuation — and the front-end asks
-    # the human, then calls resume_agent(exc, decision) to finish the turn.
+    # handler cannot answer synchronously, the pipeline's graph pauses and an
+    # ApprovalRequired propagates out of this function by design — carrying
+    # the paused graph's thread_id — and the front-end asks the human, then
+    # calls resume_agent(exc, decision) to finish the turn.
     # Trim history to the configured token budget before any LLM call.
     # We trim here — once, at the entry point — so every pipeline (ANSWER,
     # DOCS_QA, etc.) automatically receives a history that fits the budget.
@@ -324,21 +325,22 @@ def resume_agent(interrupt, decision, approval_handler=None) -> str:
     """Resume a turn that was interrupted for human approval (Step 17f).
 
     ``interrupt`` is the ApprovalRequired the front-end caught from run_agent;
-    its ``continuation`` (attached by the pipeline loop as the exception
-    unwound) tells us which pipeline to re-enter and carries its frozen state.
+    its ``continuation`` names the pipeline and carries the paused graph's
+    ``thread_id`` (Step 21.1) — the turn's state lives in the checkpointer.
     ``decision`` is the human's choice for ``interrupt.request``: False (deny),
     True (allow once), or ``approval.APPROVE_TURN`` (allow + grant the same
     tool for the rest of this turn — issue #6; the gateway records the grant
-    in the turn's ``granted`` set, carried by the continuation). The decision
-    settles ONLY that stored call (one-shot); any new gated call the resumed
-    turn makes goes back through ``approval_handler`` and can interrupt
-    again — each interrupt gets its own decision.
+    and the pipeline checkpoints it). The decision settles ONLY that stored
+    call; any new gated call the resumed turn makes goes back through
+    ``approval_handler`` and can pause again — each pause gets its own
+    decision. Resuming an approval that is no longer pending raises
+    ValueError.
 
     No intent re-classification happens here — the original classification is
-    part of the frozen turn. That (plus not re-running earlier loop steps) is
-    why resume is both cheaper and more correct than replaying the turn:
-    a replay would ask the non-deterministic LLM to regenerate the approved
-    call and hope it matches.
+    part of the paused turn. That (plus not re-running earlier steps) is why
+    resume is both cheaper and more correct than replaying the turn: a replay
+    would ask the non-deterministic LLM to regenerate the approved call and
+    hope it matches.
     """
     cont = getattr(interrupt, "continuation", None)
     if not cont:

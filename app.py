@@ -27,21 +27,20 @@ logger = logging.getLogger(__name__)
 # Streamlit cannot pause mid-run to ask a question — the script runs
 # top-to-bottom and ends; a button click re-runs it from line 1. So the
 # approval handler can't block like the CLI's y/n prompt. Instead:
-#   1. INTERRUPT — the handler always raises ApprovalRequired. As it unwinds,
-#      the pipeline loop attaches a *continuation* (the pending call + the
-#      frozen loop state) to the exception.
-#   2. CHECKPOINT — the except-block below stashes that exception in session
-#      state; the next run renders the Allow/Deny card.
+#   1. INTERRUPT — the handler always raises ApprovalRequired. The pipeline's
+#      LangGraph bridge turns that into interrupt(): the graph pauses and the
+#      turn's state is checkpointed under a thread_id (Step 21.1). The pause
+#      reaches this script as ApprovalRequired carrying that thread_id.
+#   2. CARD — the except-block below stashes that exception in session state;
+#      the next run renders the Allow/Deny card.
 #   3. RESUME — the click calls main.resume_agent(interrupt, decision), which
-#      re-enters the loop mid-flight and settles the EXACT stored call with
-#      the human's decision. The LLM is never asked to regenerate the call —
+#      resumes the graph and settles the EXACT stored call with the human's
+#      decision. The LLM is never asked to regenerate the call —
 #      regeneration is non-deterministic and was the flaw in the replay
 #      design this replaced (the model's argument values drifted between
 #      replays, so a recorded "yes" stopped matching and the user was asked
 #      twice for the same thing). Deny resumes too: the model receives the
 #      "user declined" observation and adapts.
-# This is hand-rolled LangGraph interrupt() + checkpointer; the production
-# version arrives with the Step 21 multi-agent track.
 def _streamlit_approval_handler(request: ApprovalRequest) -> bool:
     raise ApprovalRequired(request)
 
@@ -63,8 +62,8 @@ if "history" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []         # [{role, content, trace_id?}, ...]
 # Step 17f interrupt/resume state: the turn in flight (survives the rerun an
-# interrupt causes), the caught interrupt (carries the pending call AND the
-# frozen loop state), and the human's not-yet-consumed decision.
+# interrupt causes), the caught interrupt (carries the pending call and the
+# paused graph's thread_id), and the human's not-yet-consumed decision.
 if "pending_input" not in st.session_state:
     st.session_state.pending_input = None    # user input whose turn is in flight
 if "pending_tid" not in st.session_state:
@@ -153,9 +152,9 @@ if st.session_state.pending_approval is not None and st.session_state.resume_dec
         # the CLI's 'n'), instead of the turn silently dying.
         # "Allow for this turn" (issue #6) approves this call AND every later
         # call to the SAME tool until the turn finishes — the answer to one
-        # paging fetch raising five cards. The grant rides in the turn's own
-        # state (the continuation), so it expires with the turn automatically;
-        # the next question starts gated again.
+        # paging fetch raising five cards. The grant lives in the turn's own
+        # checkpointed state, so it expires with the turn automatically; the
+        # next question starts gated again.
         if allow_col.button("✅ Allow once", use_container_width=True):
             st.session_state.resume_decision = True
             st.rerun()
@@ -215,9 +214,9 @@ if st.session_state.pending_input is not None and (
                 else:
                     result = st.write_stream(result)
         except ApprovalRequired as exc:
-            # INTERRUPT: stash the exception (request + continuation); the next
-            # run renders the card. A resumed turn can interrupt again on a NEW
-            # gated call — that lands here too, with its own continuation.
+            # INTERRUPT: stash the exception (request + thread_id handle); the
+            # next run renders the card. A resumed turn can pause again on a
+            # NEW gated call — that lands here too, on the same thread_id.
             logger.info("Turn interrupted for approval: tool=%s server=%s",
                         exc.request.tool, exc.request.server)
             interrupted = True

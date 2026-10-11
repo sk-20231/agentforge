@@ -136,12 +136,12 @@ class MCPGateway:
         # nothing silently auto-approves.
         self.approval_handler = approval_handler
         # Turn-scoped approval grants (issue #6): (server, tool) pairs the human
-        # allowed "for the rest of this turn". The SAME set object is shared
-        # with the pipeline's continuation, so grants survive interrupt→resume
-        # (each resume passes the set back in) and die with the turn — a new
-        # turn builds a new gateway with a fresh empty set, so a grant can
-        # never leak across turns. Keyed by server AND tool: a grant for one
-        # tool must not bless a same-named tool from another server.
+        # allowed "for the rest of this turn". The pipelines seed this set from
+        # their checkpointed state and write it back after each tool call, so
+        # grants survive a pause and die with the turn — a new turn builds a
+        # new gateway with a fresh empty set, so a grant can never leak across
+        # turns. Keyed by server AND tool: a grant for one tool must not bless
+        # a same-named tool from another server.
         self.granted: set = granted if granted is not None else set()
         # One unguessable nonce per turn. Every untrusted-data wrap this gateway
         # emits uses it, so attacker-controlled tool output can't forge the
@@ -353,9 +353,9 @@ class MCPGateway:
         # Automated checks catch known-bad patterns; this gate covers the calls
         # that look legitimate to every rule but only a human can judge (e.g.
         # fetch of an attacker's *public* URL carrying exfiltrated context).
-        # The handler may raise ApprovalRequired — that deliberately unwinds the
-        # turn so a front-end that can't block (Streamlit) can ask via its own
-        # UI and replay; it must not be caught here.
+        # The handler may pause the turn instead of answering (Streamlit can't
+        # block): inside a pipeline the LangGraph bridge raises the graph's
+        # interrupt from here. It must not be caught here.
         if self._requires_approval.get(tool_name, False):
             # Turn-scoped grant check first (issue #6): if the human already
             # said "allow this tool for the rest of this turn", don't ask
@@ -368,7 +368,16 @@ class MCPGateway:
             else:
                 request = ApprovalRequest(tool=tool_name, server=server,
                                           arguments=arguments or {})
-                self._audit(tool_name, server, trusted, arg_keys, "approval_requested")
+                # A handler answering with a decision the human ALREADY made
+                # (a resumed turn re-running the paused call) says so via the
+                # optional ``resuming`` attribute. Audit it as approval_resumed,
+                # so the trail shows one request per human decision instead of
+                # a second approval_requested for the same card. ``is True``,
+                # not truthiness: an object with dynamic attributes (a mock,
+                # a __getattr__ proxy) must not claim a resume by accident.
+                resumed = getattr(self.approval_handler, "resuming", False) is True
+                self._audit(tool_name, server, trusted, arg_keys,
+                            "approval_resumed" if resumed else "approval_requested")
                 if self.approval_handler is None:
                     # No way to ask a human -> deny by default. A readable string,
                     # not an exception, so the model can observe and adapt.
@@ -385,8 +394,8 @@ class MCPGateway:
                 if decision == APPROVE_TURN:
                     # The gateway, not the handler, owns grant semantics: record
                     # the (server, tool) pair so later calls this turn skip the
-                    # ask. The set is shared with the continuation, so the
-                    # grant survives interrupt→resume and dies with the turn.
+                    # ask. The pipeline writes the set to its checkpointed
+                    # state, so the grant survives a pause and dies with the turn.
                     self.granted.add((server, tool_name))
                     self._audit(tool_name, server, trusted, arg_keys, "approved",
                                 scope="turn_grant_created")
@@ -517,9 +526,10 @@ async def mcp_gateway(trace_id: Optional[str] = None,
 
     ``approval_handler`` is the front-end's human-in-the-loop callback (Step
     17f); see ``agentforge.approval``. Omitted → gated tools are denied.
-    ``granted`` is the turn's approval-grant set (issue #6) — resume paths pass
-    the set stored in the continuation so "allow for the rest of this turn"
-    survives the interrupt; omitted (every fresh turn) → a new empty set.
+    ``granted`` is an initial approval-grant set (issue #6); omitted → a new
+    empty set. The pipelines leave it out and seed ``gw.granted`` from their
+    checkpointed state instead, so "allow for the rest of this turn" survives
+    a pause.
     """
     gw = MCPGateway(trace_id, approval_handler=approval_handler, granted=granted)
     async with contextlib.AsyncExitStack() as stack:

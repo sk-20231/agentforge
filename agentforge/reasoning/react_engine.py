@@ -239,8 +239,8 @@ def _user_question(messages: list) -> str:
 
     Observations are also appended as ``user`` messages (issue #1), so the
     question is the first user message that is NOT a tool observation. Works
-    on fresh and resumed (frozen) message lists alike — no extra state to
-    thread through the continuation.
+    on fresh and resumed (checkpointed) message lists alike — no extra field
+    needed in the graph state.
     """
     for m in messages:
         if m.get("role") == "user" and not str(m.get("content", "")).startswith(

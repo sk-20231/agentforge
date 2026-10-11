@@ -3,9 +3,9 @@
 The gate lives in MCPGateway.call() — the single trust boundary — and consults a
 front-end-supplied approval handler for tools whose server has
 ``requires_approval`` (default: every untrusted server). A handler that cannot
-answer synchronously (Streamlit) raises ApprovalRequired; the pipeline loop
-attaches a continuation (frozen loop state) and the front-end later resumes the
-turn with the human's decision. These tests mock the MCP transport the same way
+answer synchronously (Streamlit) raises ApprovalRequired; the pipeline's
+LangGraph graph pauses and checkpoints the turn (Step 21.1), and the front-end
+later resumes it with the human's decision. These tests mock the MCP transport the same way
 tests/test_mcp_client.py does, so they are fast and hermetic.
 
 The invariants under test:
@@ -13,13 +13,15 @@ The invariants under test:
   - gated + handler False     -> declined observation (never dispatched)
   - gated + handler True      -> dispatched, output still nonce-wrapped
   - not gated                 -> handler never consulted
-  - handler raises ApprovalRequired -> propagates with the loop's continuation
-  - resume settles the STORED call exactly once; new gated calls re-interrupt
+  - handler raises ApprovalRequired -> the graph pauses; ApprovalRequired
+    reaches the front-end carrying the paused graph's thread_id
+  - resume settles the STORED call exactly once; new gated calls pause again
+  - a resumed decision is audited as approval_resumed, not a second request
   - automated guards run FIRST -> a human is never asked about an SSRF-blocked call
   - every request/decision audited; arg NAMES only, never values
   - APPROVE_TURN (issue #6) grants ONE (server, tool) for the REST OF THE TURN:
-    asked once, later calls skip the gate, the grant rides the continuation
-    across interrupts and dies with the turn (never leaks into a new gateway)
+    asked once, later calls skip the gate, the grant is checkpointed across
+    pauses and dies with the turn (never leaks into a new gateway)
 """
 import asyncio
 import contextlib
@@ -32,7 +34,6 @@ from agentforge.approval import (
     APPROVE_TURN,
     ApprovalRequest,
     ApprovalRequired,
-    make_resume_handler,
     unwrap_approval_required,
 )
 from agentforge.mcp_client import mcp_gateway
@@ -151,41 +152,6 @@ class TestApprovalRequest:
         exc = ApprovalRequired(ApprovalRequest("fetch", "ext", {}))
         assert exc.continuation is None
 
-
-class TestMakeResumeHandler:
-    def _pending(self):
-        return ApprovalRequest("fetch", "ext", {"url": "http://x.com", "max": 5})
-
-    def test_grants_the_decision_for_the_exact_pending_call(self):
-        handler = make_resume_handler(True, self._pending())
-        # same tool/server/args (fresh but equal dict) -> the stored decision
-        assert handler(ApprovalRequest("fetch", "ext", {"max": 5, "url": "http://x.com"})) is True
-
-    def test_deny_decision_is_returned_too(self):
-        handler = make_resume_handler(False, self._pending())
-        assert handler(self._pending()) is False
-
-    def test_grant_is_one_shot(self):
-        fallback = MagicMock(return_value=False)
-        handler = make_resume_handler(True, self._pending(), fallback)
-        assert handler(self._pending()) is True
-        assert handler(self._pending()) is False   # second time -> fallback
-        fallback.assert_called_once()
-
-    def test_different_call_goes_to_fallback(self):
-        fallback = MagicMock(return_value=True)
-        handler = make_resume_handler(True, self._pending(), fallback)
-        other = ApprovalRequest("fetch", "ext", {"url": "http://evil.com"})
-        assert handler(other) is True
-        fallback.assert_called_once_with(other)
-
-    def test_no_fallback_denies_unknown_calls(self):
-        handler = make_resume_handler(True, self._pending())
-        other = ApprovalRequest("send", "ext", {"q": "x"})
-        assert handler(other) is False
-
-
-# --------------------------- the gate in gw.call() ---------------------------
 
 class TestApprovalGate:
     def test_gated_with_no_handler_is_denied_by_default(self):
@@ -306,6 +272,32 @@ class TestApprovalAudit:
                                   handler=MagicMock(return_value=True), capture=events)
         outcomes = [a["outcome"] for a in self._audits(events)]
         assert outcomes == ["approval_requested", "approved", "ok"]
+
+    def test_resuming_handler_is_audited_as_approval_resumed(self):
+        # A handler replaying a decision the human already made says so via
+        # ``resuming``; the trail must show it as a resume, not a new request.
+        class _Resuming:
+            resuming = True
+
+            def __call__(self, request):
+                return True
+
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="ok")
+        events = []
+        with patch("agentforge.mcp_client.AGENT_GUARDRAIL_ENABLED", False):
+            _call_through_gateway(session, _UNTRUSTED, "fetch", {"topic": "x"},
+                                  handler=_Resuming(), capture=events)
+        outcomes = [a["outcome"] for a in self._audits(events)]
+        assert outcomes == ["approval_resumed", "approved", "ok"]
+
+    def test_only_a_literal_true_resuming_flag_counts(self):
+        # MagicMock invents a truthy ``resuming`` attribute on access. A
+        # handler must not be able to claim a resume by accident.
+        session = _make_session_mock([_make_mcp_tool("fetch")])
+        events = []
+        _call_through_gateway(session, _UNTRUSTED, "fetch", {"topic": "x"},
+                              handler=MagicMock(return_value=False), capture=events)
+        assert self._audits(events)[0]["outcome"] == "approval_requested"
 
     def test_ungated_call_emits_no_approval_events(self):
         session = _make_session_mock([_make_mcp_tool("search_wikipedia")], call_text="hi")
@@ -785,13 +777,6 @@ class TestTurnScopedGrant:
                   if e == "mcp_audit" and p.get("outcome") == "approved"]
         assert scopes == ["once"]
 
-    def test_make_resume_handler_transports_approve_turn(self):
-        """The one-shot handler only carries the decision; APPROVE_TURN must
-        arrive at the gateway unchanged."""
-        pending = ApprovalRequest("fetch", "ext", {"url": "http://x.com"})
-        handler = make_resume_handler(APPROVE_TURN, pending)
-        assert handler(ApprovalRequest("fetch", "ext", {"url": "http://x.com"})) == APPROVE_TURN
-
 
 # --------------------------- ACT interrupt -> resume ---------------------------
 
@@ -809,9 +794,9 @@ _ACT_FOLLOWUP_JSON = json.dumps({
 
 
 class TestActResume:
-    def _act_env(self, stack, session, llm_responses):
+    def _act_env(self, stack, session, llm_responses, capture=None):
         from agentforge import tools as tools_pkg
-        _gateway_patches(stack, session, _UNTRUSTED)
+        _gateway_patches(stack, session, _UNTRUSTED, capture)
         client = MagicMock()
         client.chat.completions.create.side_effect = llm_responses
         stack.enter_context(patch.object(tools_pkg, "log_event"))
@@ -908,6 +893,28 @@ class TestActResume:
         tool_ids = [m["tool_call_id"] for m in followup_messages if m.get("role") == "tool"]
         assert tool_ids == ["tc1", "tc2"]
         assert json.loads(result)["reply"] == "Here is the page summary"
+
+    def test_one_card_is_one_request_in_the_audit_trail(self):
+        # LangGraph re-runs the paused node, so the gate runs twice for one
+        # card. The re-run is audited as approval_resumed (Task E), so the
+        # trail shows exactly one request per human decision.
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        tool_call = _make_openai_tool_call("fetch", json.dumps({"url": "http://8.8.8.8/p"}))
+        events = []
+        with contextlib.ExitStack() as stack:
+            tools_pkg, _ = self._act_env(stack, session, [
+                _llm_response(None, tool_calls=[tool_call]),
+                _llm_response(_ACT_FOLLOWUP_JSON),
+            ], capture=events)
+            stack.enter_context(patch("agentforge.mcp_client.AGENT_GUARDRAIL_ENABLED", False))
+            with pytest.raises(ApprovalRequired) as excinfo:
+                tools_pkg.run_llm_with_tools("u1", "fetch the page",
+                                             approval_handler=_raising_handler)
+            tools_pkg.resume_tool_loop(excinfo.value, True,
+                                       approval_handler=_raising_handler)
+        outcomes = [p["outcome"] for e, p, kw in events
+                    if e == "mcp_audit" and p.get("tool") == "fetch"]
+        assert outcomes == ["approval_requested", "approval_resumed", "approved", "ok"]
 
     def test_approve_turn_covers_the_second_call_in_the_same_response(self):
         session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")

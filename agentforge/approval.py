@@ -26,21 +26,26 @@ HOW the contract works (dependency inversion):
     No handler configured (tests, eval runs, future callers) → the gateway
     DENIES by default. Nothing ever silently auto-approves a gated call.
 
+    A handler MAY expose ``resuming = True`` when its next answer is a
+    decision the human already made (a resumed turn re-running the paused
+    call). The gateway then audits ``approval_resumed`` instead of a second
+    ``approval_requested``, so the trail shows one request per human decision.
+
 INTERRUPT → CHECKPOINT → RESUME (the non-blocking front-end story):
     Streamlit cannot pause mid-run to ask a question, so its handler raises
-    :class:`ApprovalRequired`. As the exception unwinds, the pipeline loop
-    attaches a **continuation** to it — the pending call plus the frozen loop
-    state (the messages list, the step index). The front-end stashes the
-    exception, renders Allow/Deny, and on click calls the pipeline's resume
-    entry point, which re-enters the loop mid-flight and settles the *stored*
-    call with the human's decision via :func:`make_resume_handler`.
+    :class:`ApprovalRequired`. Both tool pipelines run as LangGraph graphs
+    (Step 21.1, ``agentforge.hitl_graph``): the bridge handler turns that into
+    ``interrupt()``, which pauses the graph and checkpoints the turn's state
+    under a ``thread_id``. The pause reaches the front-end as ApprovalRequired
+    whose ``continuation`` carries only that handle. The front-end renders
+    Allow/Deny and on click calls ``main.resume_agent``, which resumes the
+    graph with ``Command(resume=decision)``.
 
     Resume — not replay — is deliberate: a human approved a SPECIFIC action.
     Re-running the turn would ask the non-deterministic LLM to regenerate that
     action and hope it matches (it often doesn't — argument values drift between
-    generations). Binding the decision to the stored action removes the hope.
-    This is hand-rolled LangGraph ``interrupt()`` + checkpointer (the production
-    equivalent, planned for the Step 21 multi-agent track).
+    generations). LangGraph re-runs only the paused node, which reads the call
+    from checkpointed state; the LLM calls live in nodes that never pause.
 """
 import asyncio
 from dataclasses import dataclass, field
@@ -65,20 +70,20 @@ class ApprovalRequest:
 class ApprovalRequired(Exception):
     """Raised by an approval handler that cannot answer synchronously.
 
-    Deliberately unwinds the whole turn (gateway → loop → run_agent → front-end).
-    On the way out, the pipeline loop sets ``continuation`` — the checkpoint a
-    resume entry point needs to re-enter the loop mid-flight (pipeline tag,
-    frozen messages, step index, the pending call). The front-end catches the
-    exception, presents ``request`` to the human, and calls
-    ``main.resume_agent(exc, decision)``. It must NOT be swallowed anywhere
-    along the way — a swallowed interrupt would silently drop the user's turn.
+    Inside a pipeline the bridge handler catches it and pauses the graph
+    instead; the pipeline then raises a fresh ApprovalRequired toward the
+    front-end with ``continuation`` set to the handle a resume needs:
+    ``{"pipeline", "thread_id", "user_id", "trace_id"}``. The turn's state
+    itself lives in the checkpointer. The front-end catches it, presents
+    ``request`` to the human, and calls ``main.resume_agent(exc, decision)``.
+    It must NOT be swallowed anywhere along the way — a swallowed interrupt
+    would silently drop the user's turn.
     """
 
     def __init__(self, request: ApprovalRequest):
         self.request = request
-        # Set by the pipeline loop as the exception unwinds (the loop, not the
-        # gateway, owns the loop state). None means "not resumable" — e.g. a
-        # handler raised outside any pipeline.
+        # Set by the pipeline when its graph pauses. None means "not
+        # resumable" — e.g. a handler raised outside any pipeline.
         self.continuation: Optional[dict] = None
         super().__init__(
             f"Human approval required for tool '{request.tool}' (server '{request.server}')"
@@ -94,9 +99,9 @@ class ApprovalRequired(Exception):
 #                  asking five times trains the human to rubber-stamp, which
 #                  is worse than asking once. Deliberately narrower than a
 #                  persistent "always allow" — the grant lives in the turn's
-#                  own state (the gateway's ``granted`` set, carried by the
-#                  continuation across interrupts), so it expires WITH the
-#                  turn by construction. There is no cleanup step to forget:
+#                  own state (the gateway's ``granted`` set, written to the
+#                  graph's checkpointed state across pauses), so it expires
+#                  WITH the turn by construction. There is no cleanup step to forget:
 #                  scope binds to the stored turn, not to ambient session
 #                  state — same artifact-binding principle as resume itself.
 # A truthy string keeps backward compatibility: any consumer that only checks
@@ -106,37 +111,6 @@ APPROVE_TURN = "approve_turn"
 # The contract front-ends implement: ApprovalRequest in → decision out (or
 # raise). The decision is False / True / APPROVE_TURN (see above).
 ApprovalHandler = Callable[[ApprovalRequest], Any]
-
-
-def make_resume_handler(decision, pending: ApprovalRequest,
-                        fallback: Optional[ApprovalHandler] = None) -> ApprovalHandler:
-    """Build the approval handler for a resumed turn: a one-shot grant.
-
-    The human's decision (False / True / APPROVE_TURN) applies to **exactly
-    the stored pending call** — same tool, same server, same arguments — and
-    is consumed on first use. The handler only *transports* the decision; the
-    gateway is what interprets APPROVE_TURN and records the turn-scoped grant.
-    Anything else the resumed loop tries goes to ``fallback`` (the front-end's
-    normal handler, so a NEW gated call triggers a fresh interrupt/card), or is
-    denied when there is no fallback. This keeps the security property intact:
-    a "yes" can never bless a call the human didn't look at.
-    """
-    state = {"used": False}
-
-    def handler(request: ApprovalRequest) -> bool:
-        if (
-            not state["used"]
-            and request.tool == pending.tool
-            and request.server == pending.server
-            and request.arguments == pending.arguments
-        ):
-            state["used"] = True
-            return decision
-        if fallback is not None:
-            return fallback(request)
-        return False  # fail-safe: no way to ask -> deny
-
-    return handler
 
 
 # Python 3.11+ has BaseExceptionGroup as a builtin; on 3.10 anyio guarantees the
@@ -150,11 +124,11 @@ except NameError:  # pragma: no cover - Python 3.10 only
 def unwrap_approval_required(exc: BaseException):
     """Return the :class:`ApprovalRequired` inside ``exc``, or ``None``.
 
-    The MCP SDK's stdio transport runs inside anyio task groups. When the
-    approval handler raises ApprovalRequired and it unwinds through those task
-    groups, Python wraps it into an ``ExceptionGroup`` ("unhandled errors in a
-    TaskGroup") — so the front-end's ``except ApprovalRequired`` would never
-    match. :func:`run_interruptible` calls this to dig the real interrupt out
+    The MCP SDK's stdio transport runs inside anyio task groups. When a
+    paused pipeline raises ApprovalRequired inside the open gateway and it
+    unwinds through those task groups, Python wraps it into an
+    ``ExceptionGroup`` ("unhandled errors in a TaskGroup") — so the
+    front-end's ``except ApprovalRequired`` would never match. :func:`run_interruptible` calls this to dig the real interrupt out
     of the (possibly nested) group and re-raise it bare, keeping the documented
     contract: callers above the bridge always see ApprovalRequired itself.
     Found live in Streamlit testing; the mocked-transport tests couldn't

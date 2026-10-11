@@ -148,9 +148,16 @@ class TestApprovalRequest:
         assert exc.request is req
         assert "fetch" in str(exc)
 
-    def test_continuation_defaults_to_none(self):
+    def test_thread_id_defaults_to_none(self):
         exc = ApprovalRequired(ApprovalRequest("fetch", "ext", {}))
-        assert exc.continuation is None
+        assert exc.thread_id is None
+
+    def test_decision_label_distinguishes_once_turn_and_deny(self):
+        from agentforge.approval import decision_label
+        assert decision_label(True) == "once"
+        assert decision_label(APPROVE_TURN) == "turn"
+        assert decision_label(False) == "denied"
+        assert decision_label(None) == "denied"
 
 
 class TestApprovalGate:
@@ -212,7 +219,7 @@ class TestApprovalGate:
 
     def test_approval_required_from_handler_propagates(self):
         # The interrupt contract (Streamlit): the exception must unwind out of
-        # gw.call() untouched so the loop can attach its continuation.
+        # gw.call() untouched, so the pipeline's bridge can turn it into a pause.
         session = _make_session_mock([_make_mcp_tool("fetch")])
 
         with pytest.raises(ApprovalRequired) as excinfo:
@@ -342,7 +349,7 @@ class TestExceptionGroupUnwrap:
         from agentforge.reasoning import react_engine
 
         inner = ApprovalRequired(self._req())
-        inner.continuation = {"pipeline": "react"}     # must survive the unwrap
+        inner.thread_id = "react-abc"                 # must survive the unwrap
 
         async def raising_loop(*args, **kwargs):
             raise ExceptionGroup("unhandled errors in a TaskGroup", [inner])
@@ -351,7 +358,7 @@ class TestExceptionGroupUnwrap:
             with pytest.raises(ApprovalRequired) as excinfo:
                 react_engine.react_loop("u", "fetch something")
         assert excinfo.value is inner          # the bare interrupt, not the group
-        assert excinfo.value.continuation == {"pipeline": "react"}
+        assert excinfo.value.thread_id == "react-abc"
 
     def test_act_bridge_reraises_bare_approval_required(self):
         from agentforge import tools as tools_pkg
@@ -427,8 +434,8 @@ class TestReactResume:
     @staticmethod
     def _checkpointed(react_engine, interrupt):
         """The paused turn's state, read from the graph's checkpointer (Step
-        21.1). The continuation carries only the thread_id handle."""
-        config = {"configurable": {"thread_id": interrupt.continuation["thread_id"]}}
+        21.1). The exception carries only the thread_id handle."""
+        config = {"configurable": {"thread_id": interrupt.thread_id}}
         return react_engine._graph().get_state(config).values
 
     def test_interrupt_checkpoints_the_pending_call(self):
@@ -438,10 +445,8 @@ class TestReactResume:
             interrupt = self._capture_interrupt(react_engine)
             state = self._checkpointed(react_engine, interrupt)
 
-        cont = interrupt.continuation
-        assert cont["pipeline"] == "react"
-        assert cont["user_id"] == "u1"
-        assert cont["thread_id"]
+        assert interrupt.thread_id.startswith("react-")   # the ID names its pipeline
+        assert state["user_id"] == "u1"
         assert state["step"] == 1                       # one think step taken
         assert state["tool_name"] == "fetch"
         assert state["tool_input"] == {"url": "http://8.8.8.8/page"}
@@ -474,7 +479,7 @@ class TestReactResume:
                 stack, session, [_REACT_TOOL_STEP, _REACT_FINAL_STEP])
             interrupt = self._capture_interrupt(react_engine)
             assert client.chat.completions.create.call_count == 1
-            react_engine.resume_react_loop(interrupt, True,
+            react_engine.resume_react_loop(interrupt.thread_id, True,
                                            approval_handler=_raising_handler)
         assert client.chat.completions.create.call_count == 2
 
@@ -484,7 +489,7 @@ class TestReactResume:
             react_engine, _ = self._react_env(
                 stack, session, [_REACT_TOOL_STEP, _REACT_FINAL_STEP])
             interrupt = self._capture_interrupt(react_engine)
-            react_engine.resume_react_loop(interrupt, True,
+            react_engine.resume_react_loop(interrupt.thread_id, True,
                                            approval_handler=_raising_handler)
             assert self._checkpointed(react_engine, interrupt) == {}
 
@@ -495,10 +500,10 @@ class TestReactResume:
             react_engine, _ = self._react_env(
                 stack, session, [_REACT_TOOL_STEP, _REACT_FINAL_STEP])
             interrupt = self._capture_interrupt(react_engine)
-            react_engine.resume_react_loop(interrupt, True,
+            react_engine.resume_react_loop(interrupt.thread_id, True,
                                            approval_handler=_raising_handler)
             with pytest.raises(ValueError):
-                react_engine.resume_react_loop(interrupt, True,
+                react_engine.resume_react_loop(interrupt.thread_id, True,
                                                approval_handler=_raising_handler)
         session.call_tool.assert_called_once()
 
@@ -540,7 +545,7 @@ class TestReactResume:
             react_engine, client = self._react_env(
                 stack, session, [_REACT_TOOL_STEP, _REACT_FINAL_STEP])
             interrupt = self._capture_interrupt(react_engine)
-            reply = react_engine.resume_react_loop(interrupt, True,
+            reply = react_engine.resume_react_loop(interrupt.thread_id, True,
                                                    approval_handler=_raising_handler)
 
         assert reply == "Trip planned"
@@ -561,7 +566,7 @@ class TestReactResume:
             react_engine, client = self._react_env(
                 stack, session, [_REACT_TOOL_STEP, _REACT_FINAL_STEP])
             interrupt = self._capture_interrupt(react_engine)
-            reply = react_engine.resume_react_loop(interrupt, False,
+            reply = react_engine.resume_react_loop(interrupt.thread_id, False,
                                                    approval_handler=_raising_handler)
 
         assert reply == "Trip planned"                  # the model adapted
@@ -581,13 +586,13 @@ class TestReactResume:
                 stack, session, [_REACT_TOOL_STEP, _REACT_SECOND_TOOL_STEP])
             interrupt = self._capture_interrupt(react_engine)
             with pytest.raises(ApprovalRequired) as excinfo:
-                react_engine.resume_react_loop(interrupt, True,
+                react_engine.resume_react_loop(interrupt.thread_id, True,
                                                approval_handler=_raising_handler)
             second = excinfo.value
             state = self._checkpointed(react_engine, second)
 
         assert second.request.arguments == {"url": "http://9.9.9.9/other"}
-        assert second.continuation["thread_id"] == interrupt.continuation["thread_id"]
+        assert second.thread_id == interrupt.thread_id
         assert state["step"] == 2                        # one step further in
         session.call_tool.assert_called_once()           # only the approved call ran
 
@@ -603,7 +608,7 @@ class TestReactResume:
                 [_REACT_TOOL_STEP, _REACT_SECOND_TOOL_STEP, _REACT_FINAL_STEP])
             interrupt = self._capture_interrupt(react_engine)
             assert self._checkpointed(react_engine, interrupt)["granted"] == []
-            reply = react_engine.resume_react_loop(interrupt, APPROVE_TURN,
+            reply = react_engine.resume_react_loop(interrupt.thread_id, APPROVE_TURN,
                                                    approval_handler=_raising_handler)
 
         assert reply == "Trip planned"                   # turn completed, no 2nd card
@@ -624,7 +629,7 @@ class TestReactResume:
                 stack, session, [_REACT_TOOL_STEP, email_step])
             interrupt = self._capture_interrupt(react_engine)
             with pytest.raises(ApprovalRequired) as excinfo:
-                react_engine.resume_react_loop(interrupt, APPROVE_TURN,
+                react_engine.resume_react_loop(interrupt.thread_id, APPROVE_TURN,
                                                approval_handler=_raising_handler)
             state = self._checkpointed(react_engine, excinfo.value)
         assert excinfo.value.request.tool == "send_email"
@@ -638,7 +643,7 @@ class TestTurnScopedGrant:
 
     The gateway interprets the decision: it records the pair in its ``granted``
     set; later calls to a granted tool dispatch without consulting the handler.
-    The set is shared with the continuation, so the grant survives
+    The pipelines checkpoint the set, so the grant survives
     interrupt→resume — and a NEW turn builds a new gateway with a fresh set,
     so a grant can never outlive its turn.
     """
@@ -727,7 +732,7 @@ class TestTurnScopedGrant:
         assert len(asked) == 2                       # asked once PER TURN
 
     def test_grant_set_is_shared_with_the_caller(self):
-        """The pipeline passes the continuation's set in; the gateway must
+        """A caller passing its own set in gets it mutated; the gateway must
         mutate THAT object (not a copy) so resume sees the grant."""
         session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
         granted = set()
@@ -819,16 +824,15 @@ class TestActResume:
                 tools_pkg.run_llm_with_tools("u1", "fetch the page",
                                              approval_handler=_raising_handler)
             interrupt = excinfo.value
-            cont = interrupt.continuation
-            assert cont["pipeline"] == "act"
-            assert cont["user_id"] == "u1"
+            assert interrupt.thread_id.startswith("act-")
             state = self._checkpointed(tools_pkg, interrupt)
+            assert state["user_id"] == "u1"
             assert state["index"] == 0                    # paused on the first call
             assert state["tool_calls"] == [{"id": "tc1", "name": "fetch",
                                             "arguments": '{"url": "http://8.8.8.8/p"}'}]
             session.call_tool.assert_not_called()
 
-            result = tools_pkg.resume_tool_loop(interrupt, True,
+            result = tools_pkg.resume_tool_loop(interrupt.thread_id, True,
                                                 approval_handler=_raising_handler)
 
         session.call_tool.assert_called_once_with("fetch", {"url": "http://8.8.8.8/p"})
@@ -837,7 +841,7 @@ class TestActResume:
     @staticmethod
     def _checkpointed(tools_pkg, interrupt):
         """The paused ACT turn's state, read from the checkpointer (Step 21.1)."""
-        config = {"configurable": {"thread_id": interrupt.continuation["thread_id"]}}
+        config = {"configurable": {"thread_id": interrupt.thread_id}}
         return tools_pkg._act_graph().get_state(config).values
 
     def test_act_interrupt_freezes_routed_model(self):
@@ -878,11 +882,11 @@ class TestActResume:
                                              approval_handler=_raising_handler)
             assert first.value.request.arguments == {"url": "http://8.8.8.8/a"}
             with pytest.raises(ApprovalRequired) as second:
-                tools_pkg.resume_tool_loop(first.value, True,
+                tools_pkg.resume_tool_loop(first.value.thread_id, True,
                                            approval_handler=_raising_handler)
             assert second.value.request.arguments == {"url": "http://9.9.9.9/b"}
             assert self._checkpointed(tools_pkg, second.value)["index"] == 1
-            result = tools_pkg.resume_tool_loop(second.value, True,
+            result = tools_pkg.resume_tool_loop(second.value.thread_id, True,
                                                 approval_handler=_raising_handler)
 
         dispatched = [c.args for c in session.call_tool.await_args_list]
@@ -910,11 +914,51 @@ class TestActResume:
             with pytest.raises(ApprovalRequired) as excinfo:
                 tools_pkg.run_llm_with_tools("u1", "fetch the page",
                                              approval_handler=_raising_handler)
-            tools_pkg.resume_tool_loop(excinfo.value, True,
+            tools_pkg.resume_tool_loop(excinfo.value.thread_id, True,
                                        approval_handler=_raising_handler)
         outcomes = [p["outcome"] for e, p, kw in events
                     if e == "mcp_audit" and p.get("tool") == "fetch"]
         assert outcomes == ["approval_requested", "approval_resumed", "approved", "ok"]
+
+    def test_pending_approval_reads_the_card_back_from_the_id(self):
+        # The front-end keeps only the thread_id; the card is rendered from it.
+        from agentforge import main as main_mod
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        tool_call = _make_openai_tool_call("fetch", json.dumps({"url": "http://8.8.8.8/p"}))
+        with contextlib.ExitStack() as stack:
+            tools_pkg, _ = self._act_env(stack, session, [
+                _llm_response(None, tool_calls=[tool_call]),
+            ])
+            with pytest.raises(ApprovalRequired) as excinfo:
+                tools_pkg.run_llm_with_tools("u1", "fetch the page", trace_id="t-1",
+                                             approval_handler=_raising_handler)
+            pending = main_mod.pending_approval(excinfo.value.thread_id)
+            main_mod.discard_approval(excinfo.value.thread_id)
+        assert pending.pipeline == "act"
+        assert pending.request == excinfo.value.request
+        assert pending.user_id == "u1"
+        assert pending.trace_id == "t-1"
+
+    def test_discarded_turn_cannot_be_resumed(self):
+        # Option A of the abandoned-pause decision: "Clear chat" discards it.
+        from agentforge import main as main_mod
+        session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
+        tool_call = _make_openai_tool_call("fetch", json.dumps({"url": "http://8.8.8.8/p"}))
+        with contextlib.ExitStack() as stack:
+            tools_pkg, _ = self._act_env(stack, session, [
+                _llm_response(None, tool_calls=[tool_call]),
+            ])
+            with pytest.raises(ApprovalRequired) as excinfo:
+                tools_pkg.run_llm_with_tools("u1", "fetch the page",
+                                             approval_handler=_raising_handler)
+            thread_id = excinfo.value.thread_id
+            main_mod.discard_approval(thread_id, reason="clear_chat")
+            assert self._checkpointed(tools_pkg, excinfo.value) == {}
+            with pytest.raises(ValueError):
+                main_mod.pending_approval(thread_id)
+            with pytest.raises(ValueError):
+                main_mod.resume_agent(thread_id, True)
+        session.call_tool.assert_not_called()
 
     def test_approve_turn_covers_the_second_call_in_the_same_response(self):
         session = _make_session_mock([_make_mcp_tool("fetch")], call_text="PAGE")
@@ -926,7 +970,7 @@ class TestActResume:
             with pytest.raises(ApprovalRequired) as first:
                 tools_pkg.run_llm_with_tools("u1", "fetch both",
                                              approval_handler=_raising_handler)
-            result = tools_pkg.resume_tool_loop(first.value, APPROVE_TURN,
+            result = tools_pkg.resume_tool_loop(first.value.thread_id, APPROVE_TURN,
                                                 approval_handler=_raising_handler)
         assert session.call_tool.await_count == 2          # one card, both fetched
         assert json.loads(result)["reply"] == "Here is the page summary"
@@ -942,11 +986,11 @@ class TestActResume:
             with pytest.raises(ApprovalRequired) as excinfo:
                 tools_pkg.run_llm_with_tools("u1", "fetch the page",
                                              approval_handler=_raising_handler)
-            tools_pkg.resume_tool_loop(excinfo.value, True,
+            tools_pkg.resume_tool_loop(excinfo.value.thread_id, True,
                                        approval_handler=_raising_handler)
             assert self._checkpointed(tools_pkg, excinfo.value) == {}   # cleaned up
             with pytest.raises(ValueError):
-                tools_pkg.resume_tool_loop(excinfo.value, True,
+                tools_pkg.resume_tool_loop(excinfo.value.thread_id, True,
                                            approval_handler=_raising_handler)
         session.call_tool.assert_called_once()
 
@@ -989,7 +1033,7 @@ class TestActResume:
             with pytest.raises(ApprovalRequired) as excinfo:
                 tools_pkg.run_llm_with_tools("u1", "fetch the page",
                                              approval_handler=_raising_handler)
-            result = tools_pkg.resume_tool_loop(excinfo.value, False,
+            result = tools_pkg.resume_tool_loop(excinfo.value.thread_id, False,
                                                 approval_handler=_raising_handler)
 
         session.call_tool.assert_not_called()
@@ -1013,42 +1057,69 @@ class TestResumeAgent:
         # install.
         monkeypatch.setattr("agentforge.main.AGENT_OUTPUT_GUARDRAIL_ENABLED", False)
 
-    def _interrupt(self, pipeline, **extra):
-        exc = ApprovalRequired(ApprovalRequest("fetch", "ext", {"url": "http://x.com"}))
-        exc.continuation = {"pipeline": pipeline, "user_id": "u1",
-                            "trace_id": "tid1", **extra}
-        return exc
+    @staticmethod
+    def _pending(pipeline):
+        from agentforge.hitl_graph import PendingApproval
+        return PendingApproval(
+            thread_id=f"{pipeline}-t1", pipeline=pipeline,
+            request=ApprovalRequest("fetch", "ext", {"url": "http://x.com"}),
+            user_id="u1", trace_id="tid1", values={})
 
     def test_react_resume_is_dispatched(self):
         from agentforge import main as main_mod
-        with patch.object(main_mod, "resume_react_loop", return_value="done") as rr, \
+        with patch.object(main_mod, "pending_approval", return_value=self._pending("react")), \
+             patch.object(main_mod, "resume_react_loop", return_value="done") as rr, \
              patch.object(main_mod, "log_event"):
-            result = main_mod.resume_agent(self._interrupt("react"), True)
+            result = main_mod.resume_agent("react-t1", True)
         assert result == "done"
-        rr.assert_called_once()
+        rr.assert_called_once_with("react-t1", True, approval_handler=None)
 
     def test_act_resume_parses_json_and_stores_memory(self):
         from agentforge import main as main_mod
         payload = json.dumps({"reply": "hi", "store_memory": True, "memory_text": "likes Greece"})
-        with patch.object(main_mod, "resume_tool_loop", return_value=payload), \
+        with patch.object(main_mod, "pending_approval", return_value=self._pending("act")), \
+             patch.object(main_mod, "resume_tool_loop", return_value=payload), \
              patch.object(main_mod, "store_memory") as sm, \
              patch.object(main_mod, "log_event"):
-            result = main_mod.resume_agent(self._interrupt("act"), True)
+            result = main_mod.resume_agent("act-t1", True)
         assert result == "hi"
-        sm.assert_called_once_with("u1", "likes Greece")
+        sm.assert_called_once_with("u1", "likes Greece")   # user ID from saved state
 
     def test_act_resume_invalid_json_is_graceful(self):
         from agentforge import main as main_mod
-        with patch.object(main_mod, "resume_tool_loop", return_value="not json"), \
+        with patch.object(main_mod, "pending_approval", return_value=self._pending("act")), \
+             patch.object(main_mod, "resume_tool_loop", return_value="not json"), \
              patch.object(main_mod, "log_event"):
-            result = main_mod.resume_agent(self._interrupt("act"), True)
+            result = main_mod.resume_agent("act-t1", True)
         assert "invalid tool response" in result.lower()
 
-    def test_missing_continuation_raises(self):
+    def test_resume_start_logs_the_exact_decision(self):
+        from agentforge import main as main_mod
+        seen = []
+        for decision in (True, APPROVE_TURN, False):
+            with patch.object(main_mod, "pending_approval", return_value=self._pending("react")), \
+                 patch.object(main_mod, "resume_react_loop", return_value="done"), \
+                 patch.object(main_mod, "log_event") as log:
+                main_mod.resume_agent("react-t1", decision)
+            start = next(c for c in log.call_args_list if c.args[0] == "resume_start")
+            seen.append(start.args[1]["decision"])
+            assert start.kwargs["trace_id"] == "tid1"      # trace ID from saved state
+        assert seen == ["once", "turn", "denied"]
+
+    def test_old_exception_handle_raises_a_clear_type_error(self):
         from agentforge import main as main_mod
         exc = ApprovalRequired(ApprovalRequest("fetch", "ext", {}))
-        with pytest.raises(ValueError):
+        with pytest.raises(TypeError, match="thread ID"):
             main_mod.resume_agent(exc, True)
+
+    def test_unknown_or_expired_thread_id_raises(self):
+        from agentforge import main as main_mod
+        with pytest.raises(ValueError):
+            main_mod.resume_agent("nopipeline", True)
+        with pytest.raises(ValueError):
+            main_mod.resume_agent("zzz-123", True)
+        with pytest.raises(ValueError):
+            main_mod.resume_agent("react-does-not-exist", True)
 
 
 # --------------------------- pipeline threading ---------------------------

@@ -8,16 +8,22 @@ node can pause for human approval. What they share lives here, once:
   LangGraph ``interrupt()``.
 - ``CHECKPOINTER`` saves each turn's state between nodes, keyed by a
   per-turn ``thread_id``.
+- ``new_thread_id`` / ``pipeline_of`` — a thread ID names its pipeline
+  (``react-…`` / ``act-…``), so the ID alone is enough to resume a turn.
 - ``run_graph`` invokes or resumes a graph, turns a pause into
-  ApprovalRequired for the front-end, and deletes a finished turn's thread.
-- ``pending_state`` loads a paused turn for resume and refuses one that is
-  no longer pending.
+  ApprovalRequired (carrying the thread ID) for the front-end, and deletes a
+  finished turn's thread.
+- ``pending_approval`` / ``apending_approval`` read a paused turn back as a
+  ``PendingApproval``, and refuse one that is no longer pending.
+- ``discard`` deletes a paused turn the user abandoned.
 
 The rule both graphs are built around: LangGraph saves state only BETWEEN
 nodes, and on resume re-runs the paused node from its first line. So the
 non-deterministic LLM calls live in nodes that never pause, and a node that
 can pause makes at most ONE gated call per run, reading it from saved state.
 """
+import uuid
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -30,6 +36,32 @@ from agentforge.logger import log_event
 # so turns never share state. A persistent checkpointer (SQLite / Postgres)
 # drops in here when multi-user needs state to outlive the process.
 CHECKPOINTER = InMemorySaver()
+
+
+def new_thread_id(pipeline: str) -> str:
+    """A fresh per-turn thread ID that names its pipeline, e.g. ``act-3f9a…``."""
+    return f"{pipeline}-{uuid.uuid4().hex}"
+
+
+def pipeline_of(thread_id: str) -> str:
+    """The pipeline a thread ID belongs to (the part before the first ``-``).
+    Raises ValueError for anything that is not a pipeline-prefixed ID."""
+    if not isinstance(thread_id, str) or "-" not in thread_id:
+        raise ValueError(f"Not a pipeline thread ID: {thread_id!r}")
+    return thread_id.split("-", 1)[0]
+
+
+@dataclass(frozen=True)
+class PendingApproval:
+    """A paused turn, read back from the checkpointer: what the human is
+    being asked about, and what a resume needs. ``values`` is the saved
+    graph state."""
+    thread_id: str
+    pipeline: str
+    request: ApprovalRequest
+    user_id: str
+    trace_id: Optional[str]
+    values: dict
 
 
 class GraphApprovalHandler:
@@ -67,33 +99,58 @@ def _config(thread_id: str, recursion_limit: int) -> dict:
             "recursion_limit": recursion_limit}
 
 
-async def pending_state(graph, thread_id: str, pipeline: str,
-                        trace_id: Optional[str]) -> dict:
-    """The saved state of a paused turn. Raises ValueError if the turn is no
-    longer pending — already resumed (e.g. a double click), finished, or
-    never paused — rather than starting a turn with no state, so a settled
-    call is never dispatched again."""
-    snapshot = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+def _pending_from_snapshot(snapshot, thread_id: str, pipeline: str) -> PendingApproval:
     # Ask the precise question — "is an interrupt waiting?" — not "is a node
     # scheduled next?". A second interrupt() inside one node run leaves
     # ``snapshot.next`` empty while the interrupt is still pending.
-    if not any(task.interrupts for task in snapshot.tasks):
+    waiting = [i for task in snapshot.tasks for i in task.interrupts]
+    if not waiting:
         log_event(f"{pipeline}_resume_rejected",
                   {"thread_id": thread_id, "reason": "no pending interrupt"},
-                  trace_id=trace_id)
+                  trace_id=snapshot.values.get("trace_id"))
         raise ValueError("This approval is no longer pending and cannot be resumed.")
-    return snapshot.values
+    payload = waiting[0].value
+    values = dict(snapshot.values)
+    return PendingApproval(
+        thread_id=thread_id, pipeline=pipeline,
+        request=ApprovalRequest(tool=payload["tool"], server=payload["server"],
+                                arguments=payload["arguments"]),
+        user_id=values.get("user_id", ""), trace_id=values.get("trace_id"),
+        values=values)
+
+
+def pending_approval(graph, thread_id: str, pipeline: str) -> PendingApproval:
+    """The paused turn ``thread_id`` (sync — for the front-end's card).
+    Raises ValueError if the turn is no longer pending — already resumed
+    (e.g. a double click), finished, discarded, or never paused — so a
+    settled call is never dispatched again."""
+    snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
+    return _pending_from_snapshot(snapshot, thread_id, pipeline)
+
+
+async def apending_approval(graph, thread_id: str, pipeline: str) -> PendingApproval:
+    """Async twin of ``pending_approval``, for the resume path."""
+    snapshot = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+    return _pending_from_snapshot(snapshot, thread_id, pipeline)
+
+
+def discard(thread_id: str, reason: str) -> None:
+    """Delete a paused turn the user abandoned (e.g. "Clear chat" while a
+    card is pending), so it does not stay in memory until the app restarts.
+    Safe to call for a thread that no longer exists."""
+    CHECKPOINTER.delete_thread(thread_id)
+    log_event("approval_discarded", {"thread_id": thread_id, "reason": reason})
 
 
 async def run_graph(graph, graph_input, *, thread_id: str, recursion_limit: int,
-                    context: Any, pipeline: str, user_id: str,
+                    context: Any, pipeline: str,
                     trace_id: Optional[str], output_key: str,
                     progress_key: str) -> Any:
     """Invoke (or resume) ``graph``; translate a pause into ApprovalRequired.
 
-    Until the front-ends move to ``thread_id`` (Step 21.1 task F), a paused
-    graph still surfaces as ApprovalRequired — its continuation carries only
-    the handle; the turn state lives in the checkpointer. A finished turn's
+    A paused graph surfaces as ApprovalRequired carrying ``thread_id`` — the
+    only handle a resume needs; the turn state lives in the checkpointer. A
+    finished turn's
     thread is deleted, so the in-memory checkpointer does not grow with every
     turn. ``progress_key`` names the state field logged at a pause (REACT's
     step counter, ACT's tool-call index).
@@ -113,10 +170,7 @@ async def run_graph(graph, graph_input, *, thread_id: str, recursion_limit: int,
                       {"thread_id": thread_id, progress_key: result.get(progress_key),
                        "tool": request.tool},
                       trace_id=trace_id)
-            exc = ApprovalRequired(request)
-            exc.continuation = {"pipeline": pipeline, "thread_id": thread_id,
-                                "user_id": user_id, "trace_id": trace_id}
-            raise exc
+            raise ApprovalRequired(request, thread_id=thread_id)
         return result[output_key]
     finally:
         if not paused:

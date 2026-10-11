@@ -126,14 +126,13 @@ class TestRunAgentOutputGuardrail:
     @patch("agentforge.main.log_event")
     @patch("agentforge.main.resume_tool_loop")
     def test_act_resume_object_reply_is_text(self, mock_resume, mock_log):
-        from agentforge.approval import ApprovalRequest, ApprovalRequired
         from agentforge.main import resume_agent
 
-        exc = ApprovalRequired(ApprovalRequest("fetch", "ext", {"url": "http://x.com"}))
-        exc.continuation = {"pipeline": "act", "user_id": "u1", "trace_id": "t1"}
         mock_resume.return_value = json.dumps(
             {"reply": {"steps": ["send it"]}, "store_memory": False})
-        out = resume_agent(exc, True)
+        with patch("agentforge.main.pending_approval",
+                   return_value=TestResumeAgentOutputGuardrail._pending("act")):
+            out = resume_agent("act-t1", True)
         assert isinstance(out, str)
         assert "send it" in out
 
@@ -157,35 +156,39 @@ class TestResumeAgentOutputGuardrail:
     that called gated tools (e.g. fetch over untrusted web content)."""
 
     @staticmethod
-    def _interrupt(pipeline):
-        from agentforge.approval import ApprovalRequest, ApprovalRequired
-        exc = ApprovalRequired(ApprovalRequest("fetch", "ext", {"url": "http://x.com"}))
-        exc.continuation = {"pipeline": pipeline, "user_id": "u1", "trace_id": "t1"}
-        return exc
+    def _pending(pipeline):
+        from agentforge.approval import ApprovalRequest
+        from agentforge.hitl_graph import PendingApproval
+        return PendingApproval(
+            thread_id=f"{pipeline}-t1", pipeline=pipeline,
+            request=ApprovalRequest("fetch", "ext", {"url": "http://x.com"}),
+            user_id="u1", trace_id="t1", values={})
+
+    def _resume(self, pipeline):
+        from agentforge.main import resume_agent
+        with patch("agentforge.main.pending_approval", return_value=self._pending(pipeline)):
+            return resume_agent(f"{pipeline}-t1", True)
 
     @patch("agentforge.main.resume_tool_loop")
     def test_resumed_act_reply_pii_is_redacted(self, mock_resume):
-        from agentforge.main import resume_agent
         mock_resume.return_value = json.dumps(
             {"reply": "Email the report to ceo@corp.com.", "store_memory": False})
-        out = resume_agent(self._interrupt("act"), True)
+        out = self._resume("act")
         assert "ceo@corp.com" not in out
         assert "[REDACTED_EMAIL]" in out
 
     @patch("agentforge.main.resume_react_loop")
     def test_resumed_react_reply_pii_is_redacted(self, mock_resume):
-        from agentforge.main import resume_agent
         mock_resume.return_value = "Email the report to ceo@corp.com."
-        out = resume_agent(self._interrupt("react"), True)
+        out = self._resume("react")
         assert "ceo@corp.com" not in out
         assert "[REDACTED_EMAIL]" in out
 
     @patch("agentforge.main.log_event")
     @patch("agentforge.main.resume_react_loop")
     def test_resumed_redaction_is_logged_on_the_turn_trace(self, mock_resume, mock_log):
-        from agentforge.main import resume_agent
         mock_resume.return_value = "SSN 123-45-6789 on file."
-        resume_agent(self._interrupt("react"), True)
+        self._resume("react")
         redactions = [c for c in mock_log.call_args_list
                       if c.args[0] == "output_guardrail_redacted"]
         assert len(redactions) == 1
@@ -195,9 +198,8 @@ class TestResumeAgentOutputGuardrail:
     @patch("agentforge.main.AGENT_OUTPUT_GUARDRAIL_ENABLED", False)
     @patch("agentforge.main.resume_react_loop")
     def test_resumed_disabled_passes_through(self, mock_resume):
-        from agentforge.main import resume_agent
         mock_resume.return_value = "Email ceo@corp.com."
-        assert "ceo@corp.com" in resume_agent(self._interrupt("react"), True)
+        assert "ceo@corp.com" in self._resume("react")
 
 
 # --------------------- structured scanning (Step 21b.1) ---------------------

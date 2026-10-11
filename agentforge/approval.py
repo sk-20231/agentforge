@@ -37,9 +37,11 @@ INTERRUPT → CHECKPOINT → RESUME (the non-blocking front-end story):
     (Step 21.1, ``agentforge.hitl_graph``): the bridge handler turns that into
     ``interrupt()``, which pauses the graph and checkpoints the turn's state
     under a ``thread_id``. The pause reaches the front-end as ApprovalRequired
-    whose ``continuation`` carries only that handle. The front-end renders
-    Allow/Deny and on click calls ``main.resume_agent``, which resumes the
-    graph with ``Command(resume=decision)``.
+    carrying only that handle — a plain string the front-end can store
+    anywhere. The front-end renders Allow/Deny (``main.pending_approval``
+    reads the pending call back) and on click calls
+    ``main.resume_agent(thread_id, decision)``, which resumes the graph with
+    ``Command(resume=decision)``.
 
     Resume — not replay — is deliberate: a human approved a SPECIFIC action.
     Re-running the turn would ask the non-deterministic LLM to regenerate that
@@ -72,19 +74,19 @@ class ApprovalRequired(Exception):
 
     Inside a pipeline the bridge handler catches it and pauses the graph
     instead; the pipeline then raises a fresh ApprovalRequired toward the
-    front-end with ``continuation`` set to the handle a resume needs:
-    ``{"pipeline", "thread_id", "user_id", "trace_id"}``. The turn's state
-    itself lives in the checkpointer. The front-end catches it, presents
-    ``request`` to the human, and calls ``main.resume_agent(exc, decision)``.
-    It must NOT be swallowed anywhere along the way — a swallowed interrupt
-    would silently drop the user's turn.
+    front-end with ``thread_id`` set — the only handle a resume needs (the
+    turn's state lives in the checkpointer, and the ID names its pipeline).
+    The front-end keeps that string, shows ``request`` to the human, and
+    calls ``main.resume_agent(thread_id, decision)``. It must NOT be
+    swallowed anywhere along the way — a swallowed interrupt would silently
+    drop the user's turn.
     """
 
-    def __init__(self, request: ApprovalRequest):
+    def __init__(self, request: ApprovalRequest, thread_id: Optional[str] = None):
         self.request = request
         # Set by the pipeline when its graph pauses. None means "not
         # resumable" — e.g. a handler raised outside any pipeline.
-        self.continuation: Optional[dict] = None
+        self.thread_id: Optional[str] = thread_id
         super().__init__(
             f"Human approval required for tool '{request.tool}' (server '{request.server}')"
         )
@@ -111,6 +113,17 @@ APPROVE_TURN = "approve_turn"
 # The contract front-ends implement: ApprovalRequest in → decision out (or
 # raise). The decision is False / True / APPROVE_TURN (see above).
 ApprovalHandler = Callable[[ApprovalRequest], Any]
+
+
+def decision_label(decision) -> str:
+    """The decision as a log label: ``"denied"``, ``"turn"`` (APPROVE_TURN) or
+    ``"once"``. Logs used to record only approved/denied, which could not
+    tell "allow once" from "allow for the rest of this turn"."""
+    if not decision:
+        return "denied"
+    if decision == APPROVE_TURN:
+        return "turn"
+    return "once"
 
 
 # Python 3.11+ has BaseExceptionGroup as a builtin; on 3.10 anyio guarantees the
@@ -151,7 +164,7 @@ def run_interruptible(coro):
     Every sync→async bridge that can carry an approval interrupt
     (``run_llm_with_tools`` / ``react_loop`` and their resume twins) runs its
     coroutine through this so callers above the bridge always see the bare
-    ApprovalRequired (with its ``continuation`` intact — the same exception
+    ApprovalRequired (with its ``thread_id`` intact — the same exception
     object is re-raised, never a copy). Unrelated exceptions and groups
     propagate unchanged.
     """

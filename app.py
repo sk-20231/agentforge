@@ -10,7 +10,7 @@ import os
 import streamlit as st
 
 from agentforge.approval import APPROVE_TURN, ApprovalRequest, ApprovalRequired
-from agentforge.main import resume_agent, run_agent
+from agentforge.main import discard_approval, pending_approval, resume_agent, run_agent
 from agentforge.rag.document_store import ingest_file, load_corpus
 from agentforge.logger import (
     compute_cost_summary,
@@ -31,9 +31,10 @@ logger = logging.getLogger(__name__)
 #      LangGraph bridge turns that into interrupt(): the graph pauses and the
 #      turn's state is checkpointed under a thread_id (Step 21.1). The pause
 #      reaches this script as ApprovalRequired carrying that thread_id.
-#   2. CARD — the except-block below stashes that exception in session state;
-#      the next run renders the Allow/Deny card.
-#   3. RESUME — the click calls main.resume_agent(interrupt, decision), which
+#   2. CARD — the except-block below keeps only exc.thread_id (a plain
+#      string) in session state; the next run reads the pending call back with
+#      main.pending_approval(thread_id) and renders the Allow/Deny card.
+#   3. RESUME — the click calls main.resume_agent(thread_id, decision), which
 #      resumes the graph and settles the EXACT stored call with the human's
 #      decision. The LLM is never asked to regenerate the call —
 #      regeneration is non-deterministic and was the flaw in the replay
@@ -62,14 +63,15 @@ if "history" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []         # [{role, content, trace_id?}, ...]
 # Step 17f interrupt/resume state: the turn in flight (survives the rerun an
-# interrupt causes), the caught interrupt (carries the pending call and the
-# paused graph's thread_id), and the human's not-yet-consumed decision.
+# interrupt causes), the paused graph's thread_id (a plain string — the turn's
+# state lives in the checkpointer, Step 21.1), and the human's not-yet-consumed
+# decision.
 if "pending_input" not in st.session_state:
     st.session_state.pending_input = None    # user input whose turn is in flight
 if "pending_tid" not in st.session_state:
     st.session_state.pending_tid = None      # trace id kept stable across the turn
-if "pending_approval" not in st.session_state:
-    st.session_state.pending_approval = None  # the ApprovalRequired exception
+if "pending_thread_id" not in st.session_state:
+    st.session_state.pending_thread_id = None  # handle of the paused turn
 if "resume_decision" not in st.session_state:
     st.session_state.resume_decision = None   # True/False once a button is clicked
 
@@ -133,8 +135,26 @@ for msg in st.session_state.messages:
 # not decided yet. The arguments are shown in full — an informed decision needs
 # the exact URL/args the tool would receive. (Shown on screen only; the audit
 # log records arg names, never values.)
-if st.session_state.pending_approval is not None and st.session_state.resume_decision is None:
-    req = st.session_state.pending_approval.request
+def _clear_pending_turn():
+    st.session_state.pending_thread_id = None
+    st.session_state.resume_decision = None
+    st.session_state.pending_input = None
+    st.session_state.pending_tid = None
+
+
+req = None
+if st.session_state.pending_thread_id is not None and st.session_state.resume_decision is None:
+    try:
+        req = pending_approval(st.session_state.pending_thread_id).request
+    except ValueError:
+        # Already settled, discarded, or lost (the in-memory checkpointer does
+        # not survive an app restart). Say so instead of rendering a card that
+        # could never be resumed.
+        logger.warning("Pending approval %s is no longer pending; clearing it",
+                       st.session_state.pending_thread_id)
+        _clear_pending_turn()
+        st.info("That approval is no longer pending. Please ask your question again.")
+if req is not None:
     with st.chat_message("assistant"):
         st.warning("The agent wants to call a tool that requires your approval.")
         st.code(
@@ -168,7 +188,7 @@ if st.session_state.pending_approval is not None and st.session_state.resume_dec
 # ── User input ───────────────────────────────────────────────────────
 # Disabled while a decision is pending — one turn in flight at a time.
 if user_input := st.chat_input(
-    "Ask me anything...", disabled=st.session_state.pending_approval is not None
+    "Ask me anything...", disabled=st.session_state.pending_thread_id is not None
 ):
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
@@ -181,10 +201,10 @@ if user_input := st.chat_input(
 # Two ways in: a fresh input (run_agent from the top), or an Allow/Deny click
 # (resume_agent re-enters the interrupted loop mid-flight — no re-classify, no
 # re-run of earlier steps, the stored call is settled with the decision).
-ready_to_resume = (st.session_state.pending_approval is not None
+ready_to_resume = (st.session_state.pending_thread_id is not None
                    and st.session_state.resume_decision is not None)
 if st.session_state.pending_input is not None and (
-        st.session_state.pending_approval is None or ready_to_resume):
+        st.session_state.pending_thread_id is None or ready_to_resume):
     turn_input = st.session_state.pending_input
     tid = st.session_state.pending_tid
     interrupted = False
@@ -192,11 +212,11 @@ if st.session_state.pending_input is not None and (
     with st.chat_message("assistant"):
         try:
             if ready_to_resume:
-                interrupt = st.session_state.pending_approval
+                thread_id = st.session_state.pending_thread_id
                 decision = st.session_state.resume_decision
-                st.session_state.pending_approval = None
+                st.session_state.pending_thread_id = None
                 st.session_state.resume_decision = None
-                result = resume_agent(interrupt, decision,
+                result = resume_agent(thread_id, decision,
                                       approval_handler=_streamlit_approval_handler)
                 st.markdown(result)
             else:
@@ -217,11 +237,19 @@ if st.session_state.pending_input is not None and (
             # INTERRUPT: stash the exception (request + thread_id handle); the
             # next run renders the card. A resumed turn can pause again on a
             # NEW gated call — that lands here too, on the same thread_id.
-            logger.info("Turn interrupted for approval: tool=%s server=%s",
-                        exc.request.tool, exc.request.server)
-            interrupted = True
-            st.session_state.pending_approval = exc
-            st.session_state.resume_decision = None
+            if exc.thread_id is None:
+                # Not resumable (raised outside a pipeline) — never expected
+                # from run_agent; end the turn rather than loop on it.
+                logger.error("Approval interrupt without a thread_id: tool=%s",
+                             exc.request.tool)
+                result = "Something went wrong: this approval cannot be resumed."
+                st.markdown(result)
+            else:
+                logger.info("Turn interrupted for approval: tool=%s server=%s thread=%s",
+                            exc.request.tool, exc.request.server, exc.thread_id)
+                interrupted = True
+                st.session_state.pending_thread_id = exc.thread_id
+                st.session_state.resume_decision = None
         except Exception as e:
             logger.error("run_agent failed: %s", e, exc_info=True)
             result = f"Something went wrong: {e}"
@@ -288,6 +316,11 @@ with st.sidebar:
 
     st.divider()
     if st.button("Clear chat"):
+        # A card still pending is abandoned with the chat: drop its paused
+        # turn from the checkpointer instead of leaving it in memory.
+        if st.session_state.pending_thread_id is not None:
+            discard_approval(st.session_state.pending_thread_id, reason="clear_chat")
+        _clear_pending_turn()
         st.session_state.history = []
         st.session_state.messages = []
         st.rerun()

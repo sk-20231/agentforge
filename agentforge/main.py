@@ -15,7 +15,10 @@ from agentforge.config import (
 from agentforge import guardrail
 from agentforge import output_guardrail
 from agentforge.router import choose_model
+from agentforge.approval import decision_label
+from agentforge import hitl_graph
 from agentforge.tools import (
+    pending_tool_approval,
     resume_tool_loop,
     run_llm_with_tools,
     tool_catalog_for_classifier,
@@ -29,7 +32,11 @@ from agentforge.memory.semantic import (
 from agentforge.memory.response import answer_with_memory
 from agentforge.rag.qa import answer_from_docs
 from agentforge.logger import log_event, generate_trace_id, Span, log_token_usage
-from agentforge.reasoning.react_engine import react_loop, resume_react_loop
+from agentforge.reasoning.react_engine import (
+    pending_react_approval,
+    react_loop,
+    resume_react_loop,
+)
 from agentforge.conversation import trim_history, compact_history, count_tokens
 from agentforge.reply import reply_text
 
@@ -321,12 +328,36 @@ def run_agent(
     return "Okay 🙂"
 
 
-def resume_agent(interrupt, decision, approval_handler=None) -> str:
+# Which pipeline module reads a paused turn back, keyed by the thread ID's
+# pipeline prefix (``react-…`` / ``act-…``).
+_PENDING_READERS = {"react": pending_react_approval, "act": pending_tool_approval}
+
+
+def pending_approval(thread_id: str) -> hitl_graph.PendingApproval:
+    """The paused turn ``thread_id``: the request the human is asked about,
+    plus the user and trace IDs (Step 21.1). The front-end calls this to
+    render the approval card from the ID alone. Raises ValueError for an
+    unknown ID or a turn that is no longer pending (resumed, finished,
+    discarded)."""
+    pipeline = hitl_graph.pipeline_of(thread_id)
+    reader = _PENDING_READERS.get(pipeline)
+    if reader is None:
+        raise ValueError(f"Unknown pipeline in thread ID: {thread_id!r}")
+    return reader(thread_id)
+
+
+def discard_approval(thread_id: str, reason: str = "abandoned") -> None:
+    """Drop a paused turn the user abandoned (e.g. "Clear chat" while a card
+    is pending), so it does not stay in memory until the app restarts."""
+    hitl_graph.discard(thread_id, reason)
+
+
+def resume_agent(thread_id: str, decision, approval_handler=None) -> str:
     """Resume a turn that was interrupted for human approval (Step 17f).
 
-    ``interrupt`` is the ApprovalRequired the front-end caught from run_agent;
-    its ``continuation`` names the pipeline and carries the paused graph's
-    ``thread_id`` (Step 21.1) — the turn's state lives in the checkpointer.
+    ``thread_id`` is ``ApprovalRequired.thread_id`` from run_agent (Step
+    21.1) — a plain string naming the pipeline; the turn's state lives in the
+    checkpointer, so the user and trace IDs are read back from it.
     ``decision`` is the human's choice for ``interrupt.request``: False (deny),
     True (allow once), or ``approval.APPROVE_TURN`` (allow + grant the same
     tool for the rest of this turn — issue #6; the gateway records the grant
@@ -342,29 +373,31 @@ def resume_agent(interrupt, decision, approval_handler=None) -> str:
     would ask the non-deterministic LLM to regenerate the approved call and
     hope it matches.
     """
-    cont = getattr(interrupt, "continuation", None)
-    if not cont:
-        raise ValueError("This interrupt carries no continuation and cannot be resumed.")
-    tid = cont.get("trace_id")
+    if not isinstance(thread_id, str):
+        # The pre-21.1 signature took the ApprovalRequired object itself.
+        raise TypeError("resume_agent takes the thread ID (ApprovalRequired.thread_id), "
+                        f"not {type(thread_id).__name__}")
+    pending = pending_approval(thread_id)  # ValueError if no longer pending
+    tid = pending.trace_id
     log_event("resume_start", {
-        "pipeline": cont["pipeline"],
-        "tool": interrupt.request.tool,
-        "decision": "approved" if decision else "denied",
+        "pipeline": pending.pipeline,
+        "tool": pending.request.tool,
+        "decision": decision_label(decision),
     }, trace_id=tid)
 
-    if cont["pipeline"] == "react":
+    if pending.pipeline == "react":
         with Span("react_pipeline_resume", trace_id=tid) as span:
-            result = resume_react_loop(interrupt, decision,
+            result = resume_react_loop(thread_id, decision,
                                        approval_handler=approval_handler)
             span.payload = {"reply_length": len(result)}
         log_event("trace_end", {"intent": "REACT", "resumed": True}, trace_id=tid)
         return _scan_output(result, tid)
 
-    if cont["pipeline"] == "act":
+    if pending.pipeline == "act":
         # Same post-processing contract as run_agent's ACT branch: the loop
         # returns a JSON string with reply / store_memory / memory_text.
         with Span("act_tool_pipeline_resume", trace_id=tid) as span:
-            tool_output = resume_tool_loop(interrupt, decision,
+            tool_output = resume_tool_loop(thread_id, decision,
                                            approval_handler=approval_handler)
             try:
                 parsed = json.loads(tool_output)
@@ -376,11 +409,11 @@ def resume_agent(interrupt, decision, approval_handler=None) -> str:
             reply = reply_text(parsed.get("reply"), source="act_resume", trace_id=tid)
             span.payload = {"reply_length": len(reply)}
         if parsed.get("store_memory") and parsed.get("memory_text"):
-            store_memory(cont["user_id"], parsed["memory_text"])
+            store_memory(pending.user_id, parsed["memory_text"])
         log_event("trace_end", {"intent": "ACT", "resumed": True}, trace_id=tid)
         return _scan_output(reply, tid)
 
-    raise ValueError(f"Unknown pipeline in continuation: {cont['pipeline']!r}")
+    raise ValueError(f"Unknown pipeline in thread ID: {thread_id!r}")
 
 
 # -------------------------------

@@ -521,8 +521,8 @@ class TestObservationCompression:
 
 class TestReactTraceId:
     """Regression guards for issue #7: run_agent's trace_id must reach every
-    log record the ReAct module emits, the MCP gateway, and the interrupt
-    continuation. Before the fix, react_loop could not even receive a trace
+    log record the ReAct module emits, the MCP gateway, and a paused turn's
+    saved state. Before the fix, react_loop could not even receive a trace
     ID, so REACT token usage / react_* events / gateway audit entries were
     orphaned from their turn and per-trace cost reports undercounted REACT."""
 
@@ -595,10 +595,10 @@ class TestReactTraceId:
     @patch("agentforge.reasoning.react_engine.log_event")
     @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
     @patch("agentforge.reasoning.react_engine._client")
-    def test_interrupt_continuation_freezes_trace_id(self, mock_client, mock_mem,
+    def test_paused_turn_keeps_the_trace_id(self, mock_client, mock_mem,
                                                      mock_log):
-        """The continuation must carry the trace ID so the resumed half of the
-        turn (main.resume_agent reads cont["trace_id"]) logs under the SAME
+        """The paused turn's saved state must carry the trace ID so the resumed
+        half (main.resume_agent reads it back) logs under the SAME
         trace as the first half — one turn, one trace."""
         from agentforge.approval import ApprovalRequired, ApprovalRequest
 
@@ -630,7 +630,8 @@ class TestReactTraceId:
                            trace_id=self.TRACE,
                            approval_handler=_raising_handler)
 
-        assert excinfo.value.continuation["trace_id"] == self.TRACE
+        from agentforge.reasoning.react_engine import pending_react_approval
+        assert pending_react_approval(excinfo.value.thread_id).trace_id == self.TRACE
 
     @patch("agentforge.main.classify_intent")
     @patch("agentforge.main.react_loop")

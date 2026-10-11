@@ -14,7 +14,6 @@ delegate to them. The agent itself imports none of them as callable tools.
 import asyncio
 import json
 import logging
-import uuid
 from dataclasses import dataclass
 from typing import Any, Optional, TypedDict
 
@@ -24,9 +23,17 @@ from langgraph.types import Command
 
 from openai import OpenAI
 
-from agentforge.approval import ApprovalRequired, run_interruptible
+from agentforge.approval import decision_label, run_interruptible
 from agentforge.config import OPENAI_BASE_URL, OPENAI_MODEL
-from agentforge.hitl_graph import CHECKPOINTER, GraphApprovalHandler, pending_state, run_graph
+from agentforge.hitl_graph import (
+    CHECKPOINTER,
+    GraphApprovalHandler,
+    PendingApproval,
+    apending_approval,
+    new_thread_id,
+    pending_approval,
+    run_graph,
+)
 from agentforge.logger import log_event, log_token_usage
 from agentforge.mcp_client import mcp_gateway
 from agentforge.memory.semantic import get_relevant_memories
@@ -333,12 +340,12 @@ def _act_graph():
     return _ACT_GRAPH
 
 
-async def _run_act(graph_input, thread_id: str, gw, user_id: str,
+async def _run_act(graph_input, thread_id: str, gw,
                    trace_id: Optional[str]) -> str:
     return await run_graph(
         _act_graph(), graph_input, thread_id=thread_id,
         recursion_limit=_ACT_RECURSION_LIMIT, context=_ActContext(gw=gw),
-        pipeline="act", user_id=user_id, trace_id=trace_id,
+        pipeline="act", trace_id=trace_id,
         output_key="output", progress_key="index")
 
 
@@ -366,11 +373,10 @@ async def _run_tool_loop(messages: list, trace_id: str = None, approval_handler=
             "trace_id": trace_id, "tool_calls": [], "index": 0,
             "tool_messages": [], "granted": [], "output": None,
         }
-        return await _run_act(initial, uuid.uuid4().hex, gw, user_id, trace_id)
+        return await _run_act(initial, new_thread_id("act"), gw, trace_id)
 
 
-async def _resume_tool_loop_async(interrupt_exc: ApprovalRequired, decision,
-                                  fallback=None) -> str:
+async def _resume_tool_loop_async(thread_id: str, decision, fallback=None) -> str:
     """Resume a paused ACT graph with the human's decision (Step 17f / 21.1).
 
     Opens a fresh gateway (the original's server subprocesses died when the
@@ -379,21 +385,18 @@ async def _resume_tool_loop_async(interrupt_exc: ApprovalRequired, decision,
     call only; the remaining calls and the follow-up continue from there.
     Later gated calls go to ``fallback`` and can pause again.
     """
-    cont = interrupt_exc.continuation
-    trace_id = cont.get("trace_id")
-    thread_id = cont["thread_id"]
-    values = await pending_state(_act_graph(), thread_id, "act", trace_id)
+    pending = await apending_approval(_act_graph(), thread_id, "act")
+    trace_id = pending.trace_id
     log_event("act_resume", {
         "thread_id": thread_id,
-        "index": values.get("index"),
-        "tool": interrupt_exc.request.tool,
-        "decision": "approved" if decision else "denied",
+        "index": pending.values.get("index"),
+        "tool": pending.request.tool,
+        "decision": decision_label(decision),
     }, trace_id=trace_id)
 
     handler = GraphApprovalHandler(fallback, resuming=True)
     async with mcp_gateway(trace_id, approval_handler=handler) as gw:
-        return await _run_act(Command(resume=decision), thread_id, gw,
-                              cont["user_id"], trace_id)
+        return await _run_act(Command(resume=decision), thread_id, gw, trace_id)
 
 
 # -------------------- MAIN ENTRY --------------------
@@ -412,13 +415,12 @@ def run_llm_with_tools(user_id: str, user_input: str, trace_id: str = None,
                                             user_id=user_id, model=model))
 
 
-def resume_tool_loop(interrupt: ApprovalRequired, decision,
+def resume_tool_loop(thread_id: str, decision,
                      approval_handler=None) -> str:
     """Resume an ACT turn that was interrupted for human approval (Step 17f).
 
-    ``interrupt`` is the ApprovalRequired the front-end caught — its
-    ``continuation`` carries the ``thread_id`` of the paused graph (Step 21.1).
-    ``decision`` is the human's Deny (False) / Allow once (True) / APPROVE_TURN
+    ``thread_id`` is the paused graph's handle (``ApprovalRequired.thread_id``,
+    Step 21.1). ``decision`` is the human's Deny (False) / Allow once (True) / APPROVE_TURN
     (allow this tool for the rest of the turn — issue #6) for the stored
     pending call. Resume — not replay — so the decision settles the EXACT call
     the human looked at; the LLM is never asked to regenerate it. Returns the
@@ -426,4 +428,9 @@ def resume_tool_loop(interrupt: ApprovalRequired, decision,
     parses it).
     """
     return run_interruptible(
-        _resume_tool_loop_async(interrupt, decision, approval_handler))
+        _resume_tool_loop_async(thread_id, decision, approval_handler))
+
+
+def pending_tool_approval(thread_id: str) -> PendingApproval:
+    """The paused ACT turn ``thread_id``; ValueError if no longer pending."""
+    return pending_approval(_act_graph(), thread_id, "act")

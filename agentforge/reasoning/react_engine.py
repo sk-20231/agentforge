@@ -2,7 +2,6 @@
 
 import json
 import logging
-import uuid
 from dataclasses import dataclass
 from typing import Any, Optional, TypedDict
 
@@ -11,7 +10,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 from openai import OpenAI
 
-from agentforge.approval import ApprovalRequired, run_interruptible
+from agentforge.approval import decision_label, run_interruptible
 from agentforge.config import (
     OPENAI_MODEL,
     OPENAI_BASE_URL,
@@ -26,7 +25,15 @@ from agentforge.prompts import (
     REACT_TOOL_EFFICIENCY,
     SPOTLIGHT_INSTRUCTIONS,
 )
-from agentforge.hitl_graph import CHECKPOINTER, GraphApprovalHandler, pending_state, run_graph
+from agentforge.hitl_graph import (
+    CHECKPOINTER,
+    GraphApprovalHandler,
+    PendingApproval,
+    apending_approval,
+    new_thread_id,
+    pending_approval,
+    run_graph,
+)
 from agentforge.mcp_client import mcp_gateway
 from agentforge.memory.semantic import get_relevant_memories, store_memory
 from agentforge.output_guardrail import scan_structured
@@ -70,13 +77,12 @@ def react_loop(user_id: str, user_input: str, max_steps: int = 5,
                                                trace_id=trace_id, model=model))
 
 
-def resume_react_loop(interrupt: ApprovalRequired, decision,
+def resume_react_loop(thread_id: str, decision,
                       approval_handler=None) -> str:
     """Resume a ReAct turn that was interrupted for human approval (Step 17f).
 
-    ``interrupt`` is the ApprovalRequired the front-end caught — its
-    ``continuation`` carries the ``thread_id`` of the paused graph (Step 21.1).
-    ``decision`` is the human's Deny (False) / Allow once (True) / APPROVE_TURN
+    ``thread_id`` is the paused graph's handle (``ApprovalRequired.thread_id``,
+    Step 21.1). ``decision`` is the human's Deny (False) / Allow once (True) / APPROVE_TURN
     (allow this tool for the rest of the turn — issue #6) for the stored
     pending call. Resume — not replay — so the decision settles the EXACT call
     the human looked at: the graph re-runs only the ``act`` node, which reads
@@ -85,7 +91,12 @@ def resume_react_loop(interrupt: ApprovalRequired, decision,
     adapts.
     """
     return run_interruptible(
-        _react_resume_async(interrupt, decision, approval_handler))
+        _react_resume_async(thread_id, decision, approval_handler))
+
+
+def pending_react_approval(thread_id: str) -> PendingApproval:
+    """The paused ReAct turn ``thread_id``; ValueError if no longer pending."""
+    return pending_approval(_graph(), thread_id, "react")
 
 
 # ------------------------- the ReAct graph (Step 21.1) -------------------------
@@ -194,11 +205,10 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5,
             "tool_pending": False, "tool_name": None, "tool_input": None,
             "raw": None, "granted": [], "reply": None,
         }
-        return await _run(initial, uuid.uuid4().hex, max_steps, gw, user_id, trace_id)
+        return await _run(initial, new_thread_id("react"), max_steps, gw, trace_id)
 
 
-async def _react_resume_async(interrupt_exc: ApprovalRequired, decision,
-                              fallback=None) -> str:
+async def _react_resume_async(thread_id: str, decision, fallback=None) -> str:
     """Resume a paused ReAct graph with the human's decision (Step 17f / 21.1).
 
     Opens a fresh gateway (the original's server subprocesses died when the
@@ -208,29 +218,27 @@ async def _react_resume_async(interrupt_exc: ApprovalRequired, decision,
     calls go to ``fallback`` (the front-end's normal handler) and can pause
     again — each gets its own card.
     """
-    cont = interrupt_exc.continuation
-    trace_id = cont.get("trace_id")
-    thread_id = cont["thread_id"]
-    values = await pending_state(_graph(), thread_id, "react", trace_id)
+    pending = await apending_approval(_graph(), thread_id, "react")
+    trace_id = pending.trace_id
     log_event("react_resume", {
         "thread_id": thread_id,
-        "step": values.get("step"),
-        "tool": interrupt_exc.request.tool,
-        "decision": "approved" if decision else "denied",
+        "step": pending.values.get("step"),
+        "tool": pending.request.tool,
+        "decision": decision_label(decision),
     }, trace_id=trace_id)
 
     handler = GraphApprovalHandler(fallback, resuming=True)
     async with mcp_gateway(trace_id, approval_handler=handler) as gw:
-        return await _run(Command(resume=decision), thread_id, values["max_steps"],
-                          gw, cont["user_id"], trace_id)
+        return await _run(Command(resume=decision), thread_id,
+                          pending.values["max_steps"], gw, trace_id)
 
 
-async def _run(graph_input, thread_id: str, max_steps: int, gw, user_id: str,
+async def _run(graph_input, thread_id: str, max_steps: int, gw,
                trace_id: Optional[str]) -> str:
     return await run_graph(
         _graph(), graph_input, thread_id=thread_id,
         recursion_limit=_recursion_limit(max_steps),
-        context=_ReactContext(gw=gw), pipeline="react", user_id=user_id,
+        context=_ReactContext(gw=gw), pipeline="react",
         trace_id=trace_id, output_key="reply", progress_key="step")
 
 

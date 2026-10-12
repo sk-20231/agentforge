@@ -7,6 +7,7 @@ graph — including the case the pipelines are designed never to reach.
 import asyncio
 import uuid
 from typing import TypedDict
+from unittest.mock import patch
 
 import pytest
 from langgraph.graph import END, START, StateGraph
@@ -87,6 +88,24 @@ def test_discard_removes_a_paused_turn():
     hitl_graph.discard(tid, "test")
     with pytest.raises(ValueError):
         hitl_graph.pending_approval(graph, tid, "test")
+
+
+def test_discard_is_logged_on_the_turns_trace():
+    # The discard event must link to the turn it ends, like every other
+    # record of that turn (issue #7) — the trace ID comes from saved state.
+    _, tid, _ = _start()
+    with patch.object(hitl_graph, "log_event") as log:
+        hitl_graph.discard(tid, "clear_chat")
+    event, payload = log.call_args.args
+    assert event == "approval_discarded"
+    assert payload == {"thread_id": tid, "reason": "clear_chat"}
+    assert log.call_args.kwargs["trace_id"] == "t1"
+
+
+def test_discard_of_an_unknown_thread_is_safe():
+    with patch.object(hitl_graph, "log_event") as log:
+        hitl_graph.discard(f"test-{uuid.uuid4().hex}", "clear_chat")
+    assert log.call_args.kwargs["trace_id"] is None
 
 
 def test_finished_or_unknown_thread_is_not_pending():

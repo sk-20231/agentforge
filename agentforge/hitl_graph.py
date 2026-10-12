@@ -137,9 +137,15 @@ async def apending_approval(graph, thread_id: str, pipeline: str) -> PendingAppr
 def discard(thread_id: str, reason: str) -> None:
     """Delete a paused turn the user abandoned (e.g. "Clear chat" while a
     card is pending), so it does not stay in memory until the app restarts.
-    Safe to call for a thread that no longer exists."""
+    Safe to call for a thread that no longer exists. The event is logged on
+    the turn's own trace (read from its saved state before deletion), so it
+    is not orphaned from the turn it ends (issue #7)."""
+    saved = CHECKPOINTER.get_tuple({"configurable": {"thread_id": thread_id}})
+    trace_id = (saved.checkpoint.get("channel_values", {}).get("trace_id")
+                if saved is not None else None)
     CHECKPOINTER.delete_thread(thread_id)
-    log_event("approval_discarded", {"thread_id": thread_id, "reason": reason})
+    log_event("approval_discarded", {"thread_id": thread_id, "reason": reason},
+              trace_id=trace_id)
 
 
 async def run_graph(graph, graph_input, *, thread_id: str, recursion_limit: int,

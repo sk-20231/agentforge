@@ -51,8 +51,8 @@ flowchart TD
     C --> D[classify_intent<br/>LLM call - JSON mode]
     D --> E{Intent?}
     E -->|REMEMBER| F[store_memory<br/>embed + persist]
-    E -->|ACT| G[run_llm_with_tools<br/>wikipedia, weather, news]
-    E -->|REACT| H[react_loop<br/>think → act → observe]
+    E -->|ACT| G[run_llm_with_tools<br/>LangGraph: pick → dispatch → followup]
+    E -->|REACT| H[react_loop<br/>LangGraph: think ⇄ act]
     E -->|DOCS_QA| I[rewrite_query →<br/>search_docs →<br/>answer_from_docs]
     E -->|ANSWER / RESPOND_WITH_MEMORY| J[answer_with_memory<br/>inject facts]
     E -->|IGNORE| K[static reply]
@@ -66,6 +66,8 @@ flowchart TD
 ```
 
 Every LLM call goes through a `Span` context manager that records start/end timestamps, duration, and token usage. Traces are structured JSONL — grep-friendly, easy to aggregate.
+
+Both tool pipelines reach their tools over MCP through one gateway, and both run as LangGraph graphs, so a gated tool call can **pause the turn for human approval** and resume later from a checkpoint (see [decision #5](#5-human-in-the-loop-approval-for-high-impact-tool-calls)).
 
 ---
 
@@ -81,6 +83,7 @@ Every LLM call goes through a `Span` context manager that records start/end time
 | **Runtime tool discovery as single source of truth** | [`mcp_client.py — MCPGateway`](agentforge/mcp_client.py) | Classifier and ReAct prompt both render the *discovered* tool list; adding an MCP server updates routing automatically — no prompt or registry edits |
 | **Indirect prompt injection defences** | [`tools/_safety.py`](agentforge/tools/_safety.py) | Sanitize + wrap external text as `untrusted_data` so model treats it as data, not instruction |
 | **ReAct reasoning** | [`reasoning/react_engine.py`](agentforge/reasoning/react_engine.py) | Multi-step tasks need think-act-observe loops |
+| **Human-in-the-loop with LangGraph** (`interrupt()` + checkpointer) | [`hitl_graph.py`](agentforge/hitl_graph.py) + [`approval.py`](agentforge/approval.py) | A gated tool call pauses the graph; the human's decision resumes the *stored* call. LLM calls sit in nodes that never pause, so a resume never regenerates the approved call |
 | **RAG (retrieval-augmented generation)** | [`rag/`](agentforge/rag/) | Ground answers in a real corpus, not model memory |
 | **Chunking with overlap** | [`rag/document_store.py — chunk_text`](agentforge/rag/document_store.py) | Retrieval quality depends on chunk boundaries |
 | **Citation guardrails** | [`rag/qa.py — _strip_invalid_citations`](agentforge/rag/qa.py) | Deterministic safety layer on top of probabilistic output |
@@ -192,18 +195,29 @@ See [`router.py`](agentforge/router.py) and [`logger.py — compute_routing_summ
 ```
 agentforge/
 ├── agentforge/                   # Main package
-│   ├── config.py                 # Environment-based configuration
-│   ├── conversation.py           # Token budget trimming + query rewriting
+│   ├── config.py                 # Environment-based configuration (incl. the MCP server registry)
+│   ├── conversation.py           # Token budget trimming + compaction + query rewriting
 │   ├── logger.py                 # Structured event logging (JSONL) + cost + spans
-│   ├── main.py                   # Intent classification + agent orchestrator + CLI
+│   ├── main.py                   # Intent classification + agent orchestrator + resume entry point
 │   ├── prompts.py                # System prompts and structured output schema
-│   ├── tools/                    # Plugin-style tool package (one module per tool)
-│   │   ├── __init__.py           # Registry + orchestration + tool_catalog_for_classifier
+│   ├── router.py                 # Difficulty-based model routing (intent label as the signal)
+│   ├── reply.py                  # Normalizes the model's reply field to text
+│   ├── mcp_client.py             # MCP gateway — the single trust boundary for every tool call
+│   ├── safety.py                 # Sanitize, nonce spotlight wrap, SSRF URL guard
+│   ├── approval.py               # Human-in-the-loop contract: request, decision, handler
+│   ├── hitl_graph.py             # Shared LangGraph runtime: interrupt bridge, checkpointer, resume
+│   ├── guardrail.py              # Injection classifier for untrusted text (optional local model)
+│   ├── output_guardrail.py       # PII redaction on the final reply (regex / Presidio)
+│   ├── redteam.py                # Red-team harnesses: classifier, full-stack, PII
+│   ├── redteam_fullstack.py
+│   ├── redteam_pii.py
+│   ├── tools/                    # Tool implementations (served to the agent over MCP)
+│   │   ├── __init__.py           # ACT graph (pick → dispatch → followup) + classifier tool catalog
 │   │   ├── _safety.py            # Sanitize + wrap-untrusted-data helpers (anti-injection)
 │   │   ├── wikipedia.py          # Wikipedia REST API lookup
 │   │   ├── weather.py            # Open-meteo (geocode + forecast, 2-call chain)
 │   │   └── news.py               # HackerNews Algolia search
-│   ├── evaluation.py             # Recall@K + faithfulness scoring
+│   ├── evaluation.py             # Recall@K + faithfulness + trajectory scoring
 │   ├── memory/                   # Semantic memory sub-package
 │   │   ├── semantic.py           # Embeddings, similarity, memory store/retrieve
 │   │   └── response.py           # Memory-aware answer generation
@@ -211,8 +225,9 @@ agentforge/
 │   │   ├── document_store.py     # Chunking, corpus load/save, search, ingestion
 │   │   └── qa.py                 # RAG answer pipeline + citation guardrail
 │   └── reasoning/
-│       └── react_engine.py       # ReAct loop (think → act → observe → repeat)
-├── tests/                        # ~400+ tests (mostly mocked; live/contract tests skip without optional deps)
+│       └── react_engine.py       # ReAct graph (think ⇄ act)
+├── mcp_servers/                  # MCP servers wrapping the tools (+ an adversarial test server)
+├── tests/                        # Hermetic tests (count in the badge above; live/contract tests skip without optional deps)
 │   └── fixtures/
 │       └── test_corpus.json      # Pre-built corpus so CI evals run API-key-free
 ├── .github/workflows/            # CI/CD pipelines

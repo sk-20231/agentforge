@@ -8,6 +8,15 @@ streamlit>=1.30.0
 # repo is broken on arrival for everyone but the maintainer, whose venv predates
 # the release. Raise it on purpose, after testing, not by accident.
 mcp[cli]>=1.0.0,<2.0.0
+# Graph runtime + checkpointer for HITL interrupt/resume (Step 21). Same rule
+# as mcp above: every major version is bounded on purpose. langchain-core and
+# langsmith are transitive, but pinned here anyway: langgraph-checkpoint
+# declares langchain-core with no upper bound, and today only a sibling
+# package's ceiling keeps a future 2.x out. Don't rely on someone else's pin.
+# LangSmith tracing stays off unless LANGSMITH_TRACING=true is set.
+langgraph>=1.2.11,<2.0.0
+langchain-core>=1.6.3,<2.0.0
+langsmith>=0.12.5,<1.0.0
 
 # Optional: load .env from project root (agent/config.py will use it if installed)
 python-dotenv>=1.0.0

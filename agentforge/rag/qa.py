@@ -172,9 +172,15 @@ def answer_from_docs(
     stream: bool = False,
     trace_id: str = None,
     model: str = None,
+    end_trace: bool = True,
 ) -> str | Iterator[str]:
     """
     Full RAG pipeline: rewrite -> retrieve -> prompt -> generate -> guardrail.
+
+    ``end_trace`` (Step 21.2): this pipeline logs the turn's ``trace_end``
+    itself when it is the whole turn. The supervisor's documents worker is one
+    part of a turn and passes False, so the trace is not ended mid-turn.
+    Applies to the non-streaming path, the only one a worker uses.
 
     1. Rewrite the user's query into a standalone question (if history exists)
        so that follow-up questions like "How does it work?" retrieve correctly.
@@ -252,7 +258,8 @@ def answer_from_docs(
             "streamed": False,
         }
 
-    log_event("trace_end", {"intent": "DOCS_QA", "streamed": False}, trace_id=trace_id)
+    if end_trace:
+        log_event("trace_end", {"intent": "DOCS_QA", "streamed": False}, trace_id=trace_id)
     return answer
 
 

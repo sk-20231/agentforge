@@ -11,9 +11,11 @@ from agentforge.config import (
     AGENT_INPUT_GUARDRAIL_ENABLED,
     AGENT_OUTPUT_GUARDRAIL_ENABLED,
     AGENT_CONTEXT_COMPACTION_ENABLED,
+    AGENT_SUPERVISOR_ENABLED,
 )
 from agentforge import guardrail
 from agentforge import output_guardrail
+from agentforge import supervisor
 from agentforge.router import choose_model
 from agentforge.approval import decision_label
 from agentforge import hitl_graph
@@ -209,6 +211,14 @@ def run_agent(
         "compaction": AGENT_CONTEXT_COMPACTION_ENABLED,
     }, trace_id=tid)
 
+    # SUPERVISOR (Step 21.2): when enabled, a planner replaces the classifier.
+    # An unusable plan falls through to the classifier path below, unchanged.
+    if AGENT_SUPERVISOR_ENABLED:
+        result = _run_supervised(user_id, user_input, safe_history, stream, tid,
+                                 approval_handler)
+        if result is not _FALL_BACK_TO_CLASSIFIER:
+            return result
+
     try:
         with Span("intent_classification", trace_id=tid) as span:
             intent_data = classify_intent(user_input, trace_id=tid)
@@ -226,13 +236,19 @@ def run_agent(
 
     print(f"\n[Intent] {intent} — {reason}")
 
+    route = _route_turn(intent, intent_data.get("low_confidence", False), tid)
+    return _run_pipeline(intent, memory_candidate, route, user_id, user_input,
+                         safe_history, stream, tid, approval_handler)
+
+
+def _route_turn(intent: str, low_confidence: bool, tid: str):
     # MODEL ROUTING (Step 28): pick a model sized to this turn's difficulty. The
     # intent we just classified IS the (free) difficulty estimate — REACT escalates
     # to the frontier tier, everything else stays on the small tier. A low-confidence
     # classification routes UP (never silently degrade). ``route.model`` is threaded
     # into whichever pipeline runs below; REMEMBER/IGNORE make no LLM call so they
     # ignore it. With the default config (frontier == small) this is a logged no-op.
-    route = choose_model(intent, low_confidence=intent_data.get("low_confidence", False))
+    route = choose_model(intent, low_confidence=low_confidence)
     log_event("model_routed", {
         "intent": intent,
         "tier": route.tier,
@@ -243,7 +259,63 @@ def run_agent(
     # ASCII-only arrow: a non-cp1252 char here (e.g. "→") raises UnicodeEncodeError
     # on a Windows console/redirected stream and would crash the whole turn.
     print(f"[Route] {route.tier} tier -> {route.model} ({route.reason})")
+    return route
 
+
+# Returned by _run_supervised when the plan is unusable: run the classifier.
+_FALL_BACK_TO_CLASSIFIER = object()
+
+
+def _run_supervised(user_id: str, user_input: str, safe_history: list, stream: bool,
+                    tid: str, approval_handler):
+    """Plan the turn with the supervisor (Step 21.2) and run the plan.
+
+    No task (small talk) -> the planner's own reply. One task -> that worker's
+    intent runs through ``_run_pipeline`` exactly as a classified turn would,
+    with the ORIGINAL message and history (streaming and the react-… resume
+    keep working). Two or more tasks -> the supervisor graph and its combine
+    step. An unusable plan returns ``_FALL_BACK_TO_CLASSIFIER``.
+    """
+    try:
+        plan = supervisor.plan_turn(user_input, safe_history, trace_id=tid)
+    except Exception as e:
+        # plan_turn handles LLM and parse errors itself; anything else (e.g.
+        # tool discovery) must not end the turn — the classifier still can.
+        log_event("supervisor_plan_invalid", {"reason": "unexpected_error",
+                                              "error": type(e).__name__}, trace_id=tid)
+        plan = None
+    if plan is None:
+        print("\n[Supervisor] plan unusable -> classifier")
+        return _FALL_BACK_TO_CLASSIFIER
+    workers = [t["worker"] for t in plan.tasks]
+    print(f"\n[Supervisor] plan: {workers or 'direct reply'}")
+
+    if not plan.tasks:
+        log_event("trace_end", {"intent": "SUPERVISOR_DIRECT"}, trace_id=tid)
+        return _scan_output(plan.direct_reply, tid)
+
+    if len(plan.tasks) == 1:
+        task = plan.tasks[0]
+        intent = supervisor.WORKER_INTENT[task["worker"]]
+        # The remember worker's brief IS the fact to store — the role the
+        # classifier's memory_candidate plays on the classifier path.
+        memory_candidate = task["brief"] if intent == "REMEMBER" else ""
+        route = _route_turn(intent, False, tid)
+        return _run_pipeline(intent, memory_candidate, route, user_id, user_input,
+                             safe_history, stream, tid, approval_handler)
+
+    with Span("supervisor_pipeline", trace_id=tid) as span:
+        result = supervisor.run_multi(user_id, user_input, plan.tasks, trace_id=tid,
+                                      approval_handler=approval_handler)
+        span.payload = {"workers": workers, "reply_length": len(result)}
+    log_event("trace_end", {"intent": "SUPERVISOR", "workers": workers}, trace_id=tid)
+    return _scan_output(result, tid)
+
+
+def _run_pipeline(intent: str, memory_candidate, route, user_id: str, user_input: str,
+                  safe_history: list, stream: bool, tid: str, approval_handler):
+    """Run the pipeline for ``intent``. Shared by the classifier path and a
+    one-task supervisor plan, so both behave identically."""
     # -------------------------------
     # REMEMBER
     # -------------------------------
@@ -329,8 +401,9 @@ def run_agent(
 
 
 # Which pipeline module reads a paused turn back, keyed by the thread ID's
-# pipeline prefix (``react-…`` / ``act-…``).
-_PENDING_READERS = {"react": pending_react_approval, "act": pending_tool_approval}
+# pipeline prefix (``react-…`` / ``act-…`` / ``sup-…``).
+_PENDING_READERS = {"react": pending_react_approval, "act": pending_tool_approval,
+                    "sup": supervisor.pending_supervisor_approval}
 
 
 def pending_approval(thread_id: str) -> hitl_graph.PendingApproval:
@@ -412,6 +485,14 @@ def resume_agent(thread_id: str, decision, approval_handler=None) -> str:
             store_memory(pending.user_id, parsed["memory_text"])
         log_event("trace_end", {"intent": "ACT", "resumed": True}, trace_id=tid)
         return _scan_output(reply, tid)
+
+    if pending.pipeline == supervisor.PIPELINE:
+        with Span("supervisor_pipeline_resume", trace_id=tid) as span:
+            result = supervisor.resume(thread_id, decision,
+                                       approval_handler=approval_handler)
+            span.payload = {"reply_length": len(result)}
+        log_event("trace_end", {"intent": "SUPERVISOR", "resumed": True}, trace_id=tid)
+        return _scan_output(result, tid)
 
     raise ValueError(f"Unknown pipeline in thread ID: {thread_id!r}")
 

@@ -177,6 +177,19 @@ ROUTING_HARD_INTENTS = frozenset(
     if i.strip()
 )
 
+# --- SUPERVISOR (Step 21.2) --------------------------------------------------
+# When on, a planner replaces the intent classifier: one LLM call splits the
+# request into tasks and gives each to a worker (memory, research = the REACT
+# loop, the user's documents, a plain answer). A one-task plan runs today's
+# pipeline unchanged; two or more tasks run the supervisor graph and a combine
+# step (agentforge/supervisor.py). DEFAULT OFF, so a fresh clone behaves
+# exactly as before. The planner plans ONCE, before any worker runs, so it
+# never reads worker output (plan-then-execute — the injection defence).
+AGENT_SUPERVISOR_ENABLED = _env_flag("AGENT_SUPERVISOR_ENABLED", False)
+# Most tasks one plan may hold. A plan with more is treated as invalid and the
+# turn falls back to the classifier path, rather than silently dropping parts.
+AGENT_SUPERVISOR_MAX_WORKERS = int(os.environ.get("AGENT_SUPERVISOR_MAX_WORKERS", "4"))
+
 
 # MCP servers the agent connects to at runtime to discover and call tools.
 #

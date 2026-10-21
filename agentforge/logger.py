@@ -10,6 +10,8 @@ The Span context manager measures wall-clock duration and auto-logs on exit.
 compute_latency_percentiles reads the log file and returns P50/P95 latency
 breakdowns per span name — useful for identifying bottlenecks.
 """
+import contextlib
+import contextvars
 import json
 import time
 import uuid
@@ -17,6 +19,39 @@ import statistics
 from datetime import datetime, timezone
 
 from agentforge.config import AGENT_LOG_FILE
+
+# The token meter that is active in the current context, if any (Step 21.2).
+# A contextvar, so it follows the code into awaited coroutines and the tasks
+# LangGraph starts for nodes, but never leaks into an unrelated turn.
+_TOKEN_METER: contextvars.ContextVar = contextvars.ContextVar("token_meter", default=None)
+
+
+class TokenMeter:
+    """Running token totals for the LLM calls made inside ``token_meter()``."""
+
+    def __init__(self):
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+
+    @property
+    def total(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+
+@contextlib.contextmanager
+def token_meter():
+    """Count the tokens of every ``log_token_usage`` call made inside the block.
+
+    Used to report one worker's spend (``tokens_used``) without giving it a
+    separate trace — the turn keeps one trace ID, so per-trace cost reports
+    stay whole. Meters nest: an inner meter counts only its own block.
+    """
+    meter = TokenMeter()
+    token = _TOKEN_METER.set(meter)
+    try:
+        yield meter
+    finally:
+        _TOKEN_METER.reset(token)
 
 
 def generate_trace_id() -> str:
@@ -178,6 +213,10 @@ def log_token_usage(
             "total_tokens": total_tokens,
             "cost_usd": round(cost_usd, 6),
         }, trace_id=trace_id)
+        meter = _TOKEN_METER.get()
+        if meter is not None:
+            meter.prompt_tokens += prompt_tokens
+            meter.completion_tokens += completion_tokens
     except Exception:
         pass
 

@@ -144,6 +144,15 @@ class _ReactContext:
 
 _GRAPH = None
 
+# Public names for callers that run this graph nested in their own graph (the
+# supervisor's research worker, Step 21.2).
+ReactContext = _ReactContext
+
+
+def react_graph():
+    """The compiled ReAct graph, for running it nested inside another graph."""
+    return _graph()
+
 
 def _graph():
     """The compiled ReAct graph (built once, on first use)."""
@@ -181,31 +190,52 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5,
     guard is kept as a last resort, and shape validation (action.get("type")
     etc.) stays too: valid JSON does not mean correct keys or values.
     """
-    memory_chunks = get_relevant_memories(user_id, user_input)
-    log_event("react_start", {"user_input": user_input, "max_steps": max_steps},
-              trace_id=trace_id)
-
     # No front-end handler -> pass None, so the gateway denies by default and
     # audits it as "no approval handler configured".
     handler = (GraphApprovalHandler(approval_handler)
                if approval_handler is not None else None)
     async with mcp_gateway(trace_id, approval_handler=handler) as gw:
-        # Build the prompt once, injecting the live tool catalog so the model can
-        # only reference tools that are actually served this turn.
-        messages = build_prompt(user_input, memory_chunks)
-        messages.append({"role": "system", "content": render_tool_catalog(gw.catalog)})
-        messages.append({"role": "system", "content": REACT_TOOL_EFFICIENCY})
-        messages.append({"role": "system", "content": OUTPUT_SCHEMA})
-        log_event("react_tools_discovered", {"tools": [t["name"] for t in gw.catalog]},
-                  trace_id=trace_id)
-
-        initial = {
-            "user_id": user_id, "messages": messages, "step": 0,
-            "max_steps": max_steps, "model": model, "trace_id": trace_id,
-            "tool_pending": False, "tool_name": None, "tool_input": None,
-            "raw": None, "granted": [], "reply": None,
-        }
+        initial = build_react_input(user_id, user_input, gw, max_steps=max_steps,
+                                    trace_id=trace_id, model=model)
         return await _run(initial, new_thread_id("react"), max_steps, gw, trace_id)
+
+
+def build_react_input(user_id: str, user_input: str, gw, max_steps: int = 5,
+                      trace_id: str = None, model: str = None) -> dict:
+    """The initial graph state for one ReAct turn, built inside an open gateway.
+
+    Shared by ``react_loop`` and the supervisor's research worker (Step 21.2),
+    which runs this graph nested inside its own (``react_graph()`` with
+    ``ReactContext``). The prompt is built once, with the live tool catalog,
+    so the model can only reference tools that are actually served this turn.
+    """
+    memory_chunks = get_relevant_memories(user_id, user_input)
+    log_event("react_start", {"user_input": user_input, "max_steps": max_steps},
+              trace_id=trace_id)
+    messages = build_prompt(user_input, memory_chunks)
+    messages.append({"role": "system", "content": render_tool_catalog(gw.catalog)})
+    messages.append({"role": "system", "content": REACT_TOOL_EFFICIENCY})
+    messages.append({"role": "system", "content": OUTPUT_SCHEMA})
+    log_event("react_tools_discovered", {"tools": [t["name"] for t in gw.catalog]},
+              trace_id=trace_id)
+    return {
+        "user_id": user_id, "messages": messages, "step": 0,
+        "max_steps": max_steps, "model": model, "trace_id": trace_id,
+        "tool_pending": False, "tool_name": None, "tool_input": None,
+        "raw": None, "granted": [], "reply": None,
+    }
+
+
+def tools_called(messages: list) -> list:
+    """Names of the tools a finished ReAct turn ran, in order, read from its
+    observation messages (``Observation from tool '<name>':``)."""
+    prefix = "Observation from tool '"
+    names = []
+    for m in messages:
+        content = str(m.get("content", ""))
+        if m.get("role") == "user" and content.startswith(prefix):
+            names.append(content[len(prefix):].split("'", 1)[0])
+    return names
 
 
 async def _react_resume_async(thread_id: str, decision, fallback=None) -> str:

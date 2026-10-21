@@ -126,6 +126,26 @@ class TestAnswerFromDocs:
         assert "[real_0]" in result
         assert "[hallucinated_99]" not in result
 
+    @pytest.mark.parametrize("end_trace, expected", [(True, 1), (False, 0)])
+    @patch("agentforge.rag.qa.log_event")
+    @patch("agentforge.rag.qa._client")
+    @patch("agentforge.rag.qa.search_docs")
+    def test_end_trace_flag_controls_the_trace_end_event(self, mock_search, mock_client,
+                                                         mock_log, end_trace, expected):
+        """Step 21.2: the supervisor's documents worker is one part of a turn,
+        so it must not end the turn's trace (end_trace=False)."""
+        mock_search.return_value = [
+            {"id": "c0", "text": "Chunk.", "source": "doc.txt", "score": 0.9},
+        ]
+        msg = MagicMock()
+        msg.content = "Answer [c0]."
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=msg)])
+
+        answer_from_docs("question", end_trace=end_trace)
+        trace_ends = [c for c in mock_log.call_args_list if c.args[0] == "trace_end"]
+        assert len(trace_ends) == expected
+
     @patch("agentforge.rag.qa.search_docs")
     def test_no_docs_returns_fallback_message(self, mock_search):
         mock_search.return_value = []

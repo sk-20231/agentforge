@@ -1,0 +1,798 @@
+[
+  {
+    "id": "plan_001",
+    "message": "hi",
+    "history": [],
+    "accept": [
+      []
+    ],
+    "keywords": [],
+    "group": "single",
+    "dependent": false
+  },
+  {
+    "id": "plan_002",
+    "message": "thanks, that's all for now",
+    "history": [],
+    "accept": [
+      []
+    ],
+    "keywords": [],
+    "group": "single",
+    "dependent": false
+  },
+  {
+    "id": "plan_003",
+    "message": "I prefer vegetarian food",
+    "history": [],
+    "accept": [
+      [
+        "remember"
+      ]
+    ],
+    "keywords": [
+      "vegetarian"
+    ],
+    "group": "single",
+    "dependent": false
+  },
+  {
+    "id": "plan_004",
+    "message": "My name is Alex and I work as a backend engineer",
+    "history": [],
+    "accept": [
+      [
+        "remember"
+      ],
+      [
+        "remember",
+        "remember"
+      ]
+    ],
+    "keywords": [
+      "backend"
+    ],
+    "group": "single",
+    "dependent": false
+  },
+  {
+    "id": "plan_005",
+    "message": "what's the weather in Tokyo",
+    "history": [],
+    "accept": [
+      [
+        "research"
+      ]
+    ],
+    "keywords": [
+      "tokyo"
+    ],
+    "group": "single",
+    "dependent": false
+  },
+  {
+    "id": "plan_006",
+    "message": "latest news about OpenAI",
+    "history": [],
+    "accept": [
+      [
+        "research"
+      ]
+    ],
+    "keywords": [
+      "openai"
+    ],
+    "group": "single",
+    "dependent": false
+  },
+  {
+    "id": "plan_007",
+    "message": "who is Ada Lovelace",
+    "history": [],
+    "accept": [
+      [
+        "research"
+      ],
+      [
+        "answer"
+      ]
+    ],
+    "keywords": [
+      "lovelace"
+    ],
+    "group": "single",
+    "dependent": false
+  },
+  {
+    "id": "plan_008",
+    "message": "explain what a hash map is",
+    "history": [],
+    "accept": [
+      [
+        "answer"
+      ]
+    ],
+    "keywords": [
+      "hash"
+    ],
+    "group": "single",
+    "dependent": false
+  },
+  {
+    "id": "plan_009",
+    "message": "what food do I like?",
+    "history": [],
+    "accept": [
+      [
+        "answer"
+      ]
+    ],
+    "keywords": [],
+    "group": "single",
+    "dependent": false
+  },
+  {
+    "id": "plan_010",
+    "message": "what does the handbook say about remote work?",
+    "history": [],
+    "accept": [
+      [
+        "read_user_documents"
+      ]
+    ],
+    "keywords": [
+      "remote"
+    ],
+    "group": "single",
+    "dependent": false
+  },
+  {
+    "id": "plan_011",
+    "message": "according to my documents, how many vacation days do I get?",
+    "history": [],
+    "accept": [
+      [
+        "read_user_documents"
+      ]
+    ],
+    "keywords": [
+      "vacation"
+    ],
+    "group": "single",
+    "dependent": false
+  },
+  {
+    "id": "plan_012",
+    "message": "plan a 3-day trip to Paris for me based on the weather",
+    "history": [],
+    "accept": [
+      [
+        "research"
+      ]
+    ],
+    "keywords": [
+      "paris"
+    ],
+    "group": "dependent",
+    "dependent": true
+  },
+  {
+    "id": "plan_013",
+    "message": "Find out where the CEO of OpenAI was born, and tell me today's weather in that city.",
+    "history": [],
+    "accept": [
+      [
+        "research"
+      ]
+    ],
+    "keywords": [],
+    "group": "dependent",
+    "dependent": true
+  },
+  {
+    "id": "plan_014",
+    "message": "What does the employee handbook say about parental leave, and what is the latest news about parental leave laws?",
+    "history": [],
+    "accept": [
+      [
+        "read_user_documents",
+        "research"
+      ]
+    ],
+    "keywords": [
+      "parental"
+    ],
+    "group": "multi_part",
+    "dependent": false
+  },
+  {
+    "id": "plan_015",
+    "message": "What's the weather in Paris and in Tokyo?",
+    "history": [],
+    "accept": [
+      [
+        "research",
+        "research"
+      ],
+      [
+        "research"
+      ]
+    ],
+    "keywords": [
+      "paris",
+      "tokyo"
+    ],
+    "group": "multi_part",
+    "dependent": false
+  },
+  {
+    "id": "plan_016",
+    "message": "Remember that I live in Minneapolis, and what's the weather there?",
+    "history": [],
+    "accept": [
+      [
+        "remember",
+        "research"
+      ]
+    ],
+    "keywords": [
+      "minneapolis"
+    ],
+    "group": "multi_part",
+    "dependent": false
+  },
+  {
+    "id": "plan_017",
+    "message": "What's the weather in London and the latest tech news about the UK?",
+    "history": [],
+    "accept": [
+      [
+        "research",
+        "research"
+      ]
+    ],
+    "keywords": [
+      "london"
+    ],
+    "group": "multi_part",
+    "dependent": false
+  },
+  {
+    "id": "plan_018",
+    "message": "Explain what RAG is, and what does my handbook say about using AI tools at work?",
+    "history": [],
+    "accept": [
+      [
+        "answer",
+        "read_user_documents"
+      ],
+      [
+        "read_user_documents",
+        "research"
+      ]
+    ],
+    "keywords": [
+      "rag"
+    ],
+    "group": "multi_part",
+    "dependent": false
+  },
+  {
+    "id": "plan_019",
+    "message": "Who was Alan Turing, and what's the latest AI news?",
+    "history": [],
+    "accept": [
+      [
+        "research",
+        "research"
+      ],
+      [
+        "answer",
+        "research"
+      ]
+    ],
+    "keywords": [
+      "turing"
+    ],
+    "group": "multi_part",
+    "dependent": false
+  },
+  {
+    "id": "plan_020",
+    "message": "Get the weather in Paris and Tokyo, and one news headline about each city.",
+    "history": [],
+    "accept": [
+      [
+        "research",
+        "research",
+        "research",
+        "research"
+      ],
+      [
+        "research",
+        "research"
+      ]
+    ],
+    "keywords": [
+      "paris",
+      "tokyo"
+    ],
+    "group": "multi_part",
+    "dependent": false
+  },
+  {
+    "id": "plan_021",
+    "message": "I'm vegetarian. Also, what does the handbook say about lunch benefits?",
+    "history": [],
+    "accept": [
+      [
+        "read_user_documents",
+        "remember"
+      ]
+    ],
+    "keywords": [
+      "vegetarian",
+      "lunch"
+    ],
+    "group": "multi_part",
+    "dependent": false
+  },
+  {
+    "id": "plan_022",
+    "message": "Summarize the handbook's sick leave policy, and tell me what's in the tech news about sick leave",
+    "history": [],
+    "accept": [
+      [
+        "read_user_documents",
+        "research"
+      ]
+    ],
+    "keywords": [
+      "sick"
+    ],
+    "group": "multi_part",
+    "dependent": false
+  },
+  {
+    "id": "plan_023",
+    "message": "And what's the latest news there?",
+    "history": [
+      {
+        "role": "user",
+        "content": "What's the weather in Berlin?"
+      },
+      {
+        "role": "assistant",
+        "content": "It's 12 C and cloudy in Berlin."
+      }
+    ],
+    "accept": [
+      [
+        "research"
+      ]
+    ],
+    "keywords": [
+      "berlin"
+    ],
+    "group": "history",
+    "dependent": false
+  },
+  {
+    "id": "plan_024",
+    "message": "Does it say anything about adoption too?",
+    "history": [
+      {
+        "role": "user",
+        "content": "What does the handbook say about parental leave?"
+      },
+      {
+        "role": "assistant",
+        "content": "The handbook gives 16 weeks of fully paid parental leave."
+      }
+    ],
+    "accept": [
+      [
+        "read_user_documents"
+      ]
+    ],
+    "keywords": [
+      "adoption"
+    ],
+    "group": "history",
+    "dependent": false
+  },
+  {
+    "id": "plan_025",
+    "message": "What's the weather there, and any tech news about the city?",
+    "history": [
+      {
+        "role": "user",
+        "content": "I'm planning a trip to Rome next month."
+      },
+      {
+        "role": "assistant",
+        "content": "That sounds great! How can I help with your Rome trip?"
+      }
+    ],
+    "accept": [
+      [
+        "research",
+        "research"
+      ]
+    ],
+    "keywords": [
+      "rome"
+    ],
+    "group": "history",
+    "dependent": false
+  },
+  {
+    "id": "plan_026",
+    "message": "Look up who wrote Pride and Prejudice, then get the Wikipedia summary of that author's birthplace.",
+    "history": [],
+    "accept": [
+      [
+        "research"
+      ]
+    ],
+    "keywords": [],
+    "group": "dependent",
+    "dependent": true
+  },
+  {
+    "id": "plan_027",
+    "message": "Check the weather in Oslo, and if it is raining, find tech news about indoor gadgets.",
+    "history": [],
+    "accept": [
+      [
+        "research"
+      ]
+    ],
+    "keywords": [
+      "oslo"
+    ],
+    "group": "dependent",
+    "dependent": true
+  },
+  {
+    "id": "plan_028",
+    "message": "Make me a packing list for my trip to Tokyo based on its current weather.",
+    "history": [],
+    "accept": [
+      [
+        "research"
+      ]
+    ],
+    "keywords": [
+      "tokyo"
+    ],
+    "group": "dependent",
+    "dependent": true
+  },
+  {
+    "id": "plan_029",
+    "message": "Compare the weather in Madrid and Lisbon and tell me which is better for a picnic today.",
+    "history": [],
+    "accept": [
+      [
+        "research"
+      ],
+      [
+        "research",
+        "research"
+      ]
+    ],
+    "keywords": [
+      "madrid",
+      "lisbon"
+    ],
+    "group": "multi_part",
+    "dependent": false
+  },
+  {
+    "id": "plan_030",
+    "message": "What's the capital of Australia, and what's the weather in Sydney right now?",
+    "history": [],
+    "accept": [
+      [
+        "answer",
+        "research"
+      ],
+      [
+        "research",
+        "research"
+      ]
+    ],
+    "keywords": [
+      "sydney"
+    ],
+    "group": "multi_part",
+    "dependent": false
+  },
+  {
+    "id": "plan_031",
+    "message": "I love hiking. What does the handbook say about volunteer days?",
+    "history": [],
+    "accept": [
+      [
+        "read_user_documents",
+        "remember"
+      ]
+    ],
+    "keywords": [
+      "hiking",
+      "volunteer"
+    ],
+    "group": "multi_part",
+    "dependent": false
+  },
+  {
+    "id": "plan_032",
+    "message": "Get the population of Canada from Wikipedia, and then tell me the weather in its largest city.",
+    "history": [],
+    "accept": [
+      [
+        "research"
+      ]
+    ],
+    "keywords": [],
+    "group": "dependent",
+    "dependent": true
+  },
+  {
+    "id": "plan_033",
+    "message": "If the weather in Chicago is below 5 degrees, suggest an indoor activity; otherwise suggest an outdoor one.",
+    "history": [],
+    "accept": [
+      [
+        "research"
+      ]
+    ],
+    "keywords": [
+      "chicago"
+    ],
+    "group": "dependent",
+    "dependent": true
+  },
+  {
+    "id": "plan_034",
+    "message": "Plan my weekend in Berlin around the weather.",
+    "history": [],
+    "accept": [
+      [
+        "research"
+      ]
+    ],
+    "keywords": [
+      "berlin"
+    ],
+    "group": "dependent",
+    "dependent": true
+  },
+  {
+    "id": "plan_035",
+    "message": "Who directed Inception, and what other films has that director made according to Wikipedia?",
+    "history": [],
+    "accept": [
+      [
+        "research"
+      ]
+    ],
+    "keywords": [],
+    "group": "dependent",
+    "dependent": true
+  },
+  {
+    "id": "plan_036",
+    "message": "What is the parental leave policy?",
+    "history": [],
+    "accept": [
+      [
+        "answer"
+      ],
+      [
+        "research"
+      ]
+    ],
+    "keywords": [],
+    "group": "documents_rule",
+    "dependent": false
+  },
+  {
+    "id": "plan_037",
+    "message": "What is parental leave?",
+    "history": [],
+    "accept": [
+      [
+        "answer"
+      ],
+      [
+        "research"
+      ]
+    ],
+    "keywords": [],
+    "group": "documents_rule",
+    "dependent": false
+  },
+  {
+    "id": "plan_038",
+    "message": "And what about sick days?",
+    "history": [
+      {
+        "role": "user",
+        "content": "What does the handbook say about parental leave?"
+      },
+      {
+        "role": "assistant",
+        "content": "The handbook gives 16 weeks of fully paid parental leave."
+      }
+    ],
+    "accept": [
+      [
+        "read_user_documents"
+      ]
+    ],
+    "keywords": [
+      "sick"
+    ],
+    "group": "history",
+    "dependent": false
+  },
+  {
+    "id": "plan_039",
+    "message": "OK, now what's the weather in Paris?",
+    "history": [
+      {
+        "role": "user",
+        "content": "What does the handbook say about parental leave?"
+      },
+      {
+        "role": "assistant",
+        "content": "The handbook gives 16 weeks of fully paid parental leave."
+      }
+    ],
+    "accept": [
+      [
+        "research"
+      ]
+    ],
+    "keywords": [
+      "paris"
+    ],
+    "group": "history",
+    "dependent": false
+  },
+  {
+    "id": "plan_040",
+    "message": "Search my files for the expense reimbursement limit.",
+    "history": [],
+    "accept": [
+      [
+        "read_user_documents"
+      ]
+    ],
+    "keywords": [
+      "expense"
+    ],
+    "group": "documents_rule",
+    "dependent": false
+  },
+  {
+    "id": "plan_041",
+    "message": "Explain in one sentence what RAG is, and fetch https://example.com and tell me the page title.",
+    "history": [],
+    "accept": [
+      [
+        "answer",
+        "research"
+      ],
+      [
+        "research",
+        "research"
+      ],
+      [
+        "research"
+      ]
+    ],
+    "keywords": [
+      "example.com"
+    ],
+    "group": "mixed_knowledge_lookup",
+    "dependent": false
+  },
+  {
+    "id": "plan_042",
+    "message": "Fetch https://example.com and summarize it.",
+    "history": [],
+    "accept": [
+      [
+        "research"
+      ]
+    ],
+    "keywords": [
+      "example.com"
+    ],
+    "group": "mixed_knowledge_lookup",
+    "dependent": false
+  },
+  {
+    "id": "plan_043",
+    "message": "What's on the page https://www.python.org? Also, what is a decorator in Python?",
+    "history": [],
+    "accept": [
+      [
+        "answer",
+        "research"
+      ],
+      [
+        "research",
+        "research"
+      ]
+    ],
+    "keywords": [
+      "python.org"
+    ],
+    "group": "mixed_knowledge_lookup",
+    "dependent": false
+  },
+  {
+    "id": "plan_044",
+    "message": "Define machine learning, and get the weather in Rome.",
+    "history": [],
+    "accept": [
+      [
+        "answer",
+        "research"
+      ],
+      [
+        "research",
+        "research"
+      ]
+    ],
+    "keywords": [
+      "rome"
+    ],
+    "group": "mixed_knowledge_lookup",
+    "dependent": false
+  },
+  {
+    "id": "plan_045",
+    "message": "Tell me a fun fact about octopuses and the current weather in Sydney.",
+    "history": [],
+    "accept": [
+      [
+        "answer",
+        "research"
+      ],
+      [
+        "research",
+        "research"
+      ]
+    ],
+    "keywords": [
+      "sydney"
+    ],
+    "group": "mixed_knowledge_lookup",
+    "dependent": false
+  },
+  {
+    "id": "plan_046",
+    "message": "What does my handbook say about remote work, and explain what a VPN is.",
+    "history": [],
+    "accept": [
+      [
+        "answer",
+        "read_user_documents"
+      ],
+      [
+        "read_user_documents",
+        "research"
+      ]
+    ],
+    "keywords": [
+      "remote"
+    ],
+    "group": "mixed_knowledge_lookup",
+    "dependent": false
+  }
+]

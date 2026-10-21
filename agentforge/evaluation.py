@@ -855,6 +855,234 @@ def review_draft_interactive(draft: dict, input_fn=input) -> dict | None:
     return entry
 
 
+# ---------------------------------------------------------------------------
+# Step 21.2 part 2 — planner eval (the supervisor's ``plan_turn``)
+# ---------------------------------------------------------------------------
+#
+# Scores the PLAN only — which workers, which briefs. No worker runs, so one
+# case costs one planner call. An exact-match score was too strict (the first,
+# scratch version: 82%): it counted plans the runtime already makes harmless
+# as failures. So each case gets ONE outcome:
+#
+#   pass             — the planned workers are an accepted plan and the briefs
+#                      keep the case's keywords
+#   harmless         — different, but the runtime makes the difference harmless:
+#                        * answer/research swapped in a 2+-task plan (in such a
+#                          plan both run on REACT — supervisor.py)
+#                        * research tasks MERGED — fewer than an accepted plan
+#                          that has no ``answer`` part (one REACT run can call
+#                          several tools). MORE research tasks than accepted is
+#                          harmful: in the first live run the extra task was a
+#                          lookup nobody asked for (the earlier turn's weather,
+#                          repeated from history), not a split of a real part.
+#   dependent_split  — a dependent request (part 2 needs part 1's result) split
+#                      into several research tasks. A measured planner limit
+#                      (0/10 on gpt-4o-mini). REACT may still finish it, so it
+#                      is neither a pass nor harmful — reported on its own.
+#   invalid          — ``plan_turn`` returned None; main.py falls back to the
+#                      intent classifier (today's behaviour, not a crash)
+#   harmful          — anything else: a part dropped, an extra task, a worker
+#                      with the wrong effect, or a brief that lost its subject
+#
+# The gate metric is the harmful rate. Known blind spot: a swap that keeps the
+# same worker list (``answer`` got the lookup, ``research`` the knowledge part)
+# scores as a pass. In a 2+-task plan that swap is harmless anyway.
+
+DEFAULT_PLANNER_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "tests", "planner_eval_dataset.json"
+)
+
+PLANNER_REQUIRED_FIELDS = {"id", "message", "accept"}
+
+PLANNER_OUTCOMES = ("pass", "harmless", "dependent_split", "invalid", "harmful")
+
+
+def load_planner_dataset(path: str = None) -> list[dict]:
+    """Load and validate the planner eval dataset.
+
+    Each entry needs: id, message (the user input), accept (a non-empty list of
+    accepted worker lists — ``[[]]`` means "no task, a direct reply").
+    Optional: history (chat messages before ``message``), keywords (must all
+    appear in the briefs, case-insensitively), group, dependent (bool).
+    Raises ValueError on a malformed dataset — same contract as the other loaders.
+    """
+    path = os.path.abspath(path or DEFAULT_PLANNER_PATH)
+    logger.info("Loading planner eval dataset from %s", path)
+
+    with open(path, encoding="utf-8") as f:
+        dataset = json.load(f)
+
+    if not isinstance(dataset, list) or len(dataset) == 0:
+        raise ValueError(
+            f"Planner dataset must be a non-empty JSON array, got {type(dataset).__name__}"
+        )
+
+    seen_ids = set()
+    for i, entry in enumerate(dataset):
+        missing = PLANNER_REQUIRED_FIELDS - set(entry.keys())
+        if missing:
+            raise ValueError(f"Entry {i} missing fields: {missing}")
+        if entry["id"] in seen_ids:
+            raise ValueError(f"Duplicate planner eval id: {entry['id']}")
+        seen_ids.add(entry["id"])
+        accept = entry["accept"]
+        if (not isinstance(accept, list) or not accept
+                or not all(isinstance(a, list) for a in accept)):
+            raise ValueError(f"Entry {entry['id']}: accept must be a non-empty list of lists")
+
+    logger.info("Loaded %d planner examples", len(dataset))
+    return dataset
+
+
+def _effective_workers(workers) -> tuple:
+    """The workers that actually run: in a 2+-task plan ``answer`` runs as research."""
+    if len(workers) >= 2:
+        workers = ["research" if w == "answer" else w for w in workers]
+    return tuple(sorted(workers))
+
+
+def _merge_research(workers) -> tuple:
+    """The worker list with any number of research tasks counted as one."""
+    rest = [w for w in workers if w != "research"]
+    return tuple(sorted(rest + (["research"] if "research" in workers else [])))
+
+
+def score_plan(entry: dict, tasks) -> dict:
+    """PURE. Give one plan exactly one outcome (see the section comment above).
+
+    ``tasks`` is ``Plan.tasks`` (a list of ``{"worker", "brief"}``) — an empty
+    list for a direct reply — or None for an invalid plan.
+    Returns {"outcome": one of PLANNER_OUTCOMES, "reason": str}.
+    """
+    if tasks is None:
+        return {"outcome": "invalid", "reason": "planner returned no usable plan"}
+
+    briefs = " ".join(t["brief"] for t in tasks).lower()
+    lost = [k for k in entry.get("keywords", []) if k.lower() not in briefs]
+    if lost:
+        return {"outcome": "harmful", "reason": f"briefs lost keyword(s): {lost}"}
+
+    planned = tuple(sorted(t["worker"] for t in tasks))
+    accepts = [tuple(sorted(a)) for a in entry["accept"]]
+    if planned in accepts:
+        return {"outcome": "pass", "reason": "accepted plan"}
+
+    effective = _effective_workers(planned)
+    if effective in {_effective_workers(a) for a in accepts}:
+        return {"outcome": "harmless",
+                "reason": "answer/research swap in a 2+-task plan (both run on REACT)"}
+
+    if entry.get("dependent") and len(effective) > 1 and set(effective) == {"research"}:
+        return {"outcome": "dependent_split",
+                "reason": f"dependent request split into {len(effective)} research tasks"}
+
+    same_shape = [a for a in accepts
+                  if "answer" not in a and _merge_research(a) == _merge_research(effective)]
+    if same_shape:
+        if any(effective.count("research") < a.count("research") for a in same_shape):
+            return {"outcome": "harmless", "reason": "research tasks merged"}
+        return {"outcome": "harmful",
+                "reason": f"extra research task(s): {effective.count('research')} planned, "
+                          f"at most {max(a.count('research') for a in same_shape)} accepted"}
+
+    return {"outcome": "harmful",
+            "reason": f"workers {list(planned)} not in accepted {[list(a) for a in accepts]}"}
+
+
+def run_planner_eval(
+    dataset: list[dict],
+    runs: int = 1,
+    planner=None,
+    verbose: bool = True,
+) -> dict:
+    """Run each case LIVE through the real planner ``runs`` times, then score it.
+
+    ``planner`` defaults to ``supervisor.plan_turn`` (one LLM call per case);
+    tests pass a fake. Each call is wrapped in ``token_meter`` and timed, so the
+    result also reports the planner's token and latency cost. A planner that
+    raises is recorded as an invalid plan — one bad case must not cancel the run.
+
+    Returns {counts, rates, total, runs, tokens, latency_ms, by_group, per_case}.
+    """
+    import time
+    from agentforge.logger import token_meter
+
+    if planner is None:
+        from agentforge.supervisor import plan_turn as planner
+        from agentforge.tools import tool_catalog_for_classifier
+        # The planner prompt lists the MCP tools. Discover them now, so the
+        # first case's latency does not include starting the MCP servers.
+        tool_catalog_for_classifier()
+
+    per_case = []
+    counts = {o: 0 for o in PLANNER_OUTCOMES}
+    by_group: dict[str, dict] = {}
+    total_tokens = 0
+    latencies = []
+
+    for run in range(runs):
+        for i, entry in enumerate(dataset):
+            group = entry.get("group", "unknown")
+            error = None
+            start = time.perf_counter()
+            with token_meter() as meter:
+                try:
+                    plan = planner(entry["message"], entry.get("history") or [])
+                except Exception as exc:
+                    logger.error("Planner crashed on %s: %s", entry["id"], exc)
+                    plan, error = None, str(exc)
+            latency_ms = (time.perf_counter() - start) * 1000
+            tasks = None if plan is None else list(plan.tasks)
+            score = score_plan(entry, tasks)
+
+            counts[score["outcome"]] += 1
+            g = by_group.setdefault(group, {o: 0 for o in PLANNER_OUTCOMES} | {"total": 0})
+            g[score["outcome"]] += 1
+            g["total"] += 1
+            total_tokens += meter.total
+            latencies.append(latency_ms)
+
+            per_case.append({
+                "id": entry["id"],
+                "run": run,
+                "group": group,
+                "message": entry["message"],
+                "outcome": score["outcome"],
+                "reason": score["reason"],
+                "tasks": tasks,
+                "tokens": meter.total,
+                "latency_ms": round(latency_ms, 1),
+                "error": error,
+            })
+            if verbose:
+                print(f"[run {run + 1}/{runs}] [{i + 1}/{len(dataset)}] "
+                      f"{entry['id']} ({group}): {score['outcome'].upper()}")
+
+    total = len(per_case)
+    latencies.sort()
+    result = {
+        "counts": counts,
+        "rates": {o: (c / total if total else 0.0) for o, c in counts.items()},
+        "total": total,
+        "runs": runs,
+        "tokens": {"total": total_tokens, "mean": total_tokens / total if total else 0.0},
+        "latency_ms": {
+            "mean": sum(latencies) / total if total else 0.0,
+            "p50": latencies[total // 2] if total else 0.0,
+            "max": latencies[-1] if total else 0.0,
+        },
+        "by_group": by_group,
+        "per_case": per_case,
+    }
+    logger.info(
+        "Planner eval complete: pass %d, harmless %d, dependent_split %d, invalid %d, "
+        "harmful %d (n=%d, %d run(s))",
+        counts["pass"], counts["harmless"], counts["dependent_split"],
+        counts["invalid"], counts["harmful"], total, runs,
+    )
+    return result
+
+
 if __name__ == "__main__":
     import sys
 
@@ -888,6 +1116,71 @@ if __name__ == "__main__":
             sys.exit(1)
         print(f"Appended {reviewed['id']} to the trajectory eval dataset.")
         sys.exit(0)
+
+    # --- Step 21.2: planner eval is a self-contained mode (no corpus needed) ---
+    if "--planner" in sys.argv:
+        runs = 1
+        out_path = None
+        for arg in sys.argv:
+            if arg.startswith("--runs="):
+                runs = int(arg.split("=")[1])
+            elif arg.startswith("--out="):
+                out_path = arg.split("=", 1)[1]
+
+        # Set after the first live run (3% harmful, 46 cases x 3): one flipped
+        # plan moves the rate ~0.7%, so 5% allows noise but catches a planner
+        # that got clearly worse.
+        PLANNER_HARMFUL_MAX = 0.05
+
+        planner_dataset = load_planner_dataset()
+        print(f"\n{'='*60}")
+        print(f"  Running Planner Eval (live plan_turn, {len(planner_dataset)} cases "
+              f"x {runs} run(s))")
+        print(f"{'='*60}\n")
+
+        pe = run_planner_eval(planner_dataset, runs=runs, verbose=True)
+
+        # Every plan of this run, so later numbers and charts come from the same run.
+        if out_path:
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(pe, f, indent=2, ensure_ascii=False)
+            print(f"\nSaved every plan of this run to {out_path}")
+
+        print(f"\n{'='*60}")
+        for outcome in PLANNER_OUTCOMES:
+            print(f"  {outcome:16s}: {pe['counts'][outcome]:3d}/{pe['total']} "
+                  f"({pe['rates'][outcome]:.0%})")
+        print(f"\n  Tokens: {pe['tokens']['total']} total, "
+              f"{pe['tokens']['mean']:.0f} per plan")
+        print(f"  Latency: mean {pe['latency_ms']['mean']:.0f} ms, "
+              f"p50 {pe['latency_ms']['p50']:.0f} ms, max {pe['latency_ms']['max']:.0f} ms")
+        print()
+        print("  By group (pass / harmless / dependent_split / invalid / harmful):")
+        for group, g in sorted(pe["by_group"].items()):
+            print(f"    {group:24s}: {g['pass']} / {g['harmless']} / "
+                  f"{g['dependent_split']} / {g['invalid']} / {g['harmful']}  (n={g['total']})")
+        print(f"{'='*60}")
+
+        # Read the misses — eval-honesty rule: never report only the headline.
+        misses = [c for c in pe["per_case"] if c["outcome"] != "pass"]
+        if misses:
+            print(f"\n  {len(misses)} plan(s) that are not a plain pass:")
+            for c in misses:
+                print(f"    [{c['outcome']}] {c['id']} (run {c['run'] + 1}): {c['reason']}")
+                print(f"      message: {c['message']}")
+                for t in c["tasks"] or []:
+                    print(f"      - {t['worker']}: {t['brief']}")
+                if c["error"]:
+                    print(f"      error: {c['error']}")
+
+        failed = pe["rates"]["harmful"] > PLANNER_HARMFUL_MAX
+        if failed:
+            print(f"\nFAIL: harmful plans {pe['rates']['harmful']:.0%} "
+                  f"above the {PLANNER_HARMFUL_MAX:.0%} limit.")
+        else:
+            print(f"\nPASS: harmful plans {pe['rates']['harmful']:.0%} "
+                  f"within the {PLANNER_HARMFUL_MAX:.0%} limit.")
+        sys.exit(1 if failed else 0)
 
     # --- Step 19: trajectory eval is a self-contained mode (no corpus needed) ---
     if "--trajectory" in sys.argv:

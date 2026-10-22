@@ -17,13 +17,16 @@ TWO ENGINES, one interface (issue #24):
        postal addresses (those have no fixed shape), and its card pattern has no Luhn
        check (it over-redacts long digit runs).
 
-    2. PRESIDIO + GLiNER (optional ``[pii]`` extra): the production PII framework. A
-       GLiNER zero-shot NER model catches PERSON and ADDRESS (the regex gap); Presidio's
-       checksum-validated recognizers handle EMAIL / SSN / CREDIT_CARD (Luhn fixes the
-       regex over-redaction); our API-key shapes stay as a custom recognizer. CORE set:
-       PERSON, ADDRESS, EMAIL, SSN, CREDIT_CARD, SECRET. IP + phone are OPT-IN
-       (``aggressive`` / ``AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE``) — they false-positive on
-       legitimate technical answers (``8.8.8.8`` in an answer is not a leak).
+    2. PRESIDIO + GLiNER (optional ``[pii]`` extra): the production PII framework.
+       Presidio's checksum-validated recognizers handle EMAIL / SSN / CREDIT_CARD (Luhn
+       fixes the regex over-redaction); our API-key shapes stay as a custom recognizer.
+       CORE set: EMAIL, SSN, CREDIT_CARD, SECRET. Two OPT-IN groups:
+       * IP + phone (``aggressive`` / ``AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE``) — they
+         false-positive on legitimate technical answers (``8.8.8.8`` is not a leak).
+       * PERSON + ADDRESS (``AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS``, issue #27) — a
+         GLiNER zero-shot NER model catches them (the regex gap), but in a factual
+         answer the name or the city is usually the answer itself: measured live,
+         it redacted "you", "Turing", "Rome". GLiNER is loaded only when this is on.
 
     ``AGENT_OUTPUT_GUARDRAIL_ENGINE`` ("auto" | "regex" | "presidio") picks the engine;
     "auto" uses Presidio when the deps are present and **degrades to regex** on any
@@ -54,6 +57,7 @@ from agentforge.config import (
     AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE,
     AGENT_OUTPUT_GUARDRAIL_ENGINE,
     AGENT_OUTPUT_GUARDRAIL_MODEL_ID,
+    AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS,
     AGENT_OUTPUT_GUARDRAIL_THRESHOLD,
 )
 
@@ -131,9 +135,8 @@ def _scan_regex(text: str, aggressive: bool) -> OutputScanResult:
 # Presidio entity name -> our redaction label. CORE is on by default; EXTENDED is the
 # opt-in (aggressive) set, kept to IP + phone for parity with the regex engine (the
 # wider Presidio zoo — IBAN/crypto/passport/etc. — is a deliberate, eval-driven later).
+# PERSON_ADDRESS is the opt-in GLiNER set (AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS).
 _CORE_ENTITIES = {
-    "PERSON": "PERSON",
-    "ADDRESS": "ADDRESS",
     "EMAIL_ADDRESS": "EMAIL",
     "US_SSN": "SSN",
     "CREDIT_CARD": "CREDIT_CARD",
@@ -142,6 +145,10 @@ _CORE_ENTITIES = {
 _EXTENDED_ENTITIES = {
     "PHONE_NUMBER": "PHONE",
     "IP_ADDRESS": "IP",
+}
+_PERSON_ADDRESS_ENTITIES = {
+    "PERSON": "PERSON",
+    "ADDRESS": "ADDRESS",
 }
 # GLiNER (zero-shot NER) owns only the freeform spans regex can't see. Limiting it to
 # person + address — rather than generic "location"/"organization" — keeps it from
@@ -153,7 +160,11 @@ def _build_presidio():
     """Build the Presidio (analyzer, anonymizer) pair once. Raises if ``[pii]`` deps
     are missing or the GLiNER model can't load — the caller catches that and degrades
     to regex. Inference is fully local; the only network is the one-time GLiNER weight
-    download (telemetry disabled here)."""
+    download (telemetry disabled here).
+
+    GLiNER is added only when ``AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS`` is on — it
+    finds nothing else, so with the setting off the model is never loaded. The
+    setting is read HERE, once: flipping it later needs ``reset_engine_cache()``."""
     import os
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -170,15 +181,18 @@ def _build_presidio():
     })
     analyzer = AnalyzerEngine(nlp_engine=provider.create_engine())
 
-    # GLiNER for PERSON/ADDRESS, then drop spaCy's own NER so it doesn't also emit
-    # (weaker) PERSON/LOCATION detections competing with GLiNER.
-    gliner = GLiNERRecognizer(
-        model_name=AGENT_OUTPUT_GUARDRAIL_MODEL_ID,
-        entity_mapping=_GLINER_LABEL_MAP,
-        flat_ner=False, multi_label=True,
-        threshold=AGENT_OUTPUT_GUARDRAIL_THRESHOLD, map_location="cpu",
-    )
-    analyzer.registry.add_recognizer(gliner)
+    # GLiNER for PERSON/ADDRESS (opt-in), then drop spaCy's own NER so it doesn't
+    # also emit (weaker) PERSON/LOCATION detections competing with GLiNER.
+    if AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS:
+        gliner = GLiNERRecognizer(
+            model_name=AGENT_OUTPUT_GUARDRAIL_MODEL_ID,
+            entity_mapping=_GLINER_LABEL_MAP,
+            flat_ner=False, multi_label=True,
+            threshold=AGENT_OUTPUT_GUARDRAIL_THRESHOLD, map_location="cpu",
+        )
+        analyzer.registry.add_recognizer(gliner)
+    else:
+        logger.info("output guardrail: PERSON/ADDRESS redaction off; GLiNER not loaded")
     try:
         analyzer.registry.remove_recognizer("SpacyRecognizer")
     except Exception:  # name varies across versions; not fatal if absent
@@ -194,6 +208,15 @@ def _build_presidio():
             Pattern("aws_access_key", r"\bAKIA[0-9A-Z]{16}\b", 0.9),
             Pattern("bearer_token", r"\bBearer\s+[A-Za-z0-9._\-]{20,}\b", 0.9),
         ],
+    ))
+    # Presidio's own SSN recognizer rejects numbers that break the issuing rules
+    # (123-45-6789, or a 9xx area). GLiNER used to catch those too; with it opt-in
+    # they would pass, and this engine must never be weaker than the regex floor —
+    # so the regex engine's SSN shape is added here as well.
+    analyzer.registry.add_recognizer(PatternRecognizer(
+        supported_entity="US_SSN",
+        name="SsnShapeRecognizer",
+        patterns=[Pattern("ssn_shape", r"\b\d{3}-\d{2}-\d{4}\b", 0.5)],
     ))
     return analyzer, AnonymizerEngine()
 
@@ -239,6 +262,8 @@ def _scan_presidio(text: str, aggressive: bool) -> OutputScanResult:
     entity_map = dict(_CORE_ENTITIES)
     if aggressive:
         entity_map.update(_EXTENDED_ENTITIES)
+    if AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS:
+        entity_map.update(_PERSON_ADDRESS_ENTITIES)
 
     results = analyzer.analyze(
         text=text, language="en",
@@ -268,8 +293,9 @@ def scan_output(text: str, aggressive: bool = None,
                 engine: str = None) -> OutputScanResult:
     """Redact PII from ``text`` using the configured engine.
 
-    Dispatches per ``AGENT_OUTPUT_GUARDRAIL_ENGINE``: "auto" prefers Presidio + GLiNER
-    (names/addresses + checksum-validated cards) and **degrades to regex** on any
+    Dispatches per ``AGENT_OUTPUT_GUARDRAIL_ENGINE``: "auto" prefers Presidio
+    (checksum-validated cards; names/addresses via GLiNER when
+    ``AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS`` is on) and **degrades to regex** on any
     failure; "regex" forces the regex floor; "presidio" forces Presidio (degrades to
     regex only if the engine truly can't load). ``aggressive`` adds the IP/phone opt-in
     set; when ``None`` it follows ``AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE``. Empty/blank

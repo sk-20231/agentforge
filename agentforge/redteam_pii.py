@@ -36,6 +36,7 @@ EGRESS: zero for the baseline — it runs the local regex guard, no model, no ne
     inbound download, same class as the gap-E classifier.)
 
 Run:  python -m agentforge.redteam_pii
+      python -m agentforge.redteam_pii --person-address   # grade names/addresses too
       python -m agentforge.redteam_pii --aggressive --out redteam_pii_report
 """
 import argparse
@@ -58,7 +59,10 @@ def _active_engine() -> str:
     report never claims Presidio when it silently fell back to regex (eval-honesty)."""
     if (AGENT_OUTPUT_GUARDRAIL_ENGINE in ("auto", "presidio")
             and output_guardrail._get_presidio() is not None):
-        return "presidio+gliner"
+        # GLiNER is loaded only with PERSON/ADDRESS on (issue #27).
+        if output_guardrail.AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS:
+            return "presidio+gliner"
+        return "presidio"
     return "regex"
 
 
@@ -238,6 +242,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--aggressive", action="store_true",
                         default=AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE,
                         help="include the opt-in IP/phone patterns")
+    parser.add_argument("--person-address", action="store_true",
+                        default=output_guardrail.AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS,
+                        help="also redact PERSON + ADDRESS (opt-in, issue #27); without it "
+                             "the PERSON/ADDRESS examples are expected to be missed")
     parser.add_argument("--out", type=str, default="redteam_pii_report",
                         help="output basename (.json)")
     args = parser.parse_args(argv)
@@ -246,6 +254,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     # NER annotates labels we don't request); it would drown the eval output.
     logging.getLogger("presidio-analyzer").setLevel(logging.ERROR)
 
+    # The setting is read when the engine is built, so rebuild it after changing it.
+    output_guardrail.AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS = args.person_address
+    output_guardrail.reset_engine_cache()
     engine = _active_engine()
     report = evaluate(PII_EVAL_EXAMPLES, aggressive=args.aggressive)
     m = report.metrics
@@ -253,6 +264,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     payload = {
         "dataset": "authored (agentforge.redteam_pii.PII_EVAL_EXAMPLES)",
         "engine": engine,
+        "person_address": args.person_address,
         "metrics": asdict(m),
         "type_recall": [asdict(t) for t in report.type_recall],
         "over_redactions": report.over_redactions,
@@ -264,8 +276,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     with open(f"{args.out}.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
-    logger.info("\n===== Output-guardrail PII eval (engine: %s, aggressive=%s) =====",
-                engine, m.aggressive)
+    logger.info("\n===== Output-guardrail PII eval (engine: %s, aggressive=%s, "
+                "person_address=%s) =====", engine, m.aggressive, args.person_address)
     logger.info("Replies: %d  (%d with PII / %d clean)", m.n, m.n_pii, m.n_clean)
     logger.info("Detection rate (PII replies redacted): %.1f%%", m.detection_rate * 100)
     logger.info("False-positive rate (clean replies redacted): %.1f%%", m.false_positive_rate * 100)

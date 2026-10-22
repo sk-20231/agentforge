@@ -8,6 +8,8 @@ Two layers:
     redacts a person name regex can't see. It SKIPS when the ``[pii]`` extra/model are
     unavailable (same pattern as the live MCP contract tests).
 """
+import sys
+import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -67,25 +69,108 @@ class TestEngineDispatch:
         assert scan_output("").count == 0
 
 
-class TestPresidioEngineIntegration:
-    """Loads the real Presidio + GLiNER engine. Skips without the [pii] extra/model."""
+class TestPersonAddressSetting:
+    """Issue #27: PERSON + ADDRESS are opt-in. Hermetic — a fake analyzer records
+    which entity types the scan asks Presidio for."""
 
     @pytest.fixture()
-    def presidio_engine(self, monkeypatch):
+    def fake_presidio(self, monkeypatch):
+        analyzer = MagicMock()
+        analyzer.analyze.return_value = []
+        monkeypatch.setattr(output_guardrail, "_get_presidio", lambda: (analyzer, MagicMock()))
+        # _scan_presidio imports presidio_anonymizer on its first line. CI does not
+        # install the [pii] extra, so stand in for the module: these tests must run
+        # everywhere, not only where the extra happens to be installed.
+        entities = types.ModuleType("presidio_anonymizer.entities")
+        entities.OperatorConfig = MagicMock()
+        package = types.ModuleType("presidio_anonymizer")
+        package.entities = entities
+        monkeypatch.setitem(sys.modules, "presidio_anonymizer", package)
+        monkeypatch.setitem(sys.modules, "presidio_anonymizer.entities", entities)
+        return analyzer
+
+    def _requested(self, analyzer):
+        return set(analyzer.analyze.call_args.kwargs["entities"])
+
+    def test_default_is_off(self):
+        from agentforge import config
+        assert config.AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS is False
+
+    def test_off_does_not_ask_for_person_or_address(self, monkeypatch, fake_presidio):
+        monkeypatch.setattr(output_guardrail, "AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS", False)
+        output_guardrail._scan_presidio("Christopher Nolan directed Inception.", False)
+        requested = self._requested(fake_presidio)
+        assert not requested & {"PERSON", "ADDRESS"}
+        # The structured CORE set is unchanged.
+        assert {"EMAIL_ADDRESS", "US_SSN", "CREDIT_CARD", "SECRET"} <= requested
+
+    def test_on_asks_for_person_and_address(self, monkeypatch, fake_presidio):
+        monkeypatch.setattr(output_guardrail, "AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS", True)
+        output_guardrail._scan_presidio("Christopher Nolan directed Inception.", False)
+        assert {"PERSON", "ADDRESS"} <= self._requested(fake_presidio)
+
+    def test_aggressive_does_not_turn_person_address_on(self, monkeypatch, fake_presidio):
+        # Two separate opt-ins: IP/phone (aggressive) and names/addresses.
+        monkeypatch.setattr(output_guardrail, "AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS", False)
+        output_guardrail._scan_presidio("Call 555-123-4567.", True)
+        requested = self._requested(fake_presidio)
+        assert {"PHONE_NUMBER", "IP_ADDRESS"} <= requested
+        assert not requested & {"PERSON", "ADDRESS"}
+
+
+class TestPresidioEngineIntegration:
+    """Loads the real Presidio engine (and GLiNER when PERSON/ADDRESS is on).
+    Skips without the [pii] extra/model."""
+
+    def _engine(self, monkeypatch, person_address: bool):
         pytest.importorskip("presidio_analyzer", reason="[pii] extra not installed")
         pytest.importorskip("gliner", reason="[pii] extra not installed")
         monkeypatch.setattr(output_guardrail, "AGENT_OUTPUT_GUARDRAIL_ENGINE", "presidio")
+        monkeypatch.setattr(output_guardrail, "AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS",
+                            person_address)
         output_guardrail.reset_engine_cache()
         if output_guardrail._get_presidio() is None:
             pytest.skip("Presidio engine unavailable (deps or model not downloaded)")
+
+    @pytest.fixture()
+    def presidio_engine(self, monkeypatch):
+        """The default: PERSON/ADDRESS off."""
+        self._engine(monkeypatch, person_address=False)
         yield
         output_guardrail.reset_engine_cache()
 
-    def test_redacts_person_name_regex_cannot_see(self, presidio_engine):
+    @pytest.fixture()
+    def presidio_engine_with_names(self, monkeypatch):
+        self._engine(monkeypatch, person_address=True)
+        yield
+        output_guardrail.reset_engine_cache()
+
+    def test_redacts_person_name_regex_cannot_see(self, presidio_engine_with_names):
         r = scan_output("Please email John Smith about the quarterly report.")
         assert "John Smith" not in r.redacted_text
         assert "[REDACTED_PERSON]" in r.redacted_text
         assert "PERSON" in r.types
+
+    def test_default_keeps_names_and_places(self, presidio_engine):
+        # Issue #27: the reply's subject must survive; structured PII still goes.
+        text = "Christopher Nolan directed Inception. The weather in Rome is 18 C. Mail a@b.com."
+        r = scan_output(text)
+        assert "Christopher Nolan" in r.redacted_text and "Rome" in r.redacted_text
+        assert "[REDACTED_EMAIL]" in r.redacted_text
+        assert set(r.types) == {"EMAIL"}
+
+    def test_default_still_redacts_ssn_shapes_presidio_rejects(self, presidio_engine):
+        # Presidio's SSN recognizer rejects 123-45-6789 and 9xx areas as invalid;
+        # without GLiNER the engine must still match the regex floor.
+        for ssn in ("123-45-6789", "987-65-4321", "111-22-3333"):
+            r = scan_output(f"The SSN on file is {ssn}.")
+            assert ssn not in r.redacted_text, ssn
+            assert "SSN" in r.types
+
+    def test_default_does_not_load_gliner(self, presidio_engine):
+        analyzer, _ = output_guardrail._get_presidio()
+        names = {type(r).__name__ for r in analyzer.registry.recognizers}
+        assert "GLiNERRecognizer" not in names
 
     def test_card_luhn_avoids_regex_false_positive(self, presidio_engine):
         # A 16-digit run that FAILS Luhn — the regex engine flags it, Presidio must not.

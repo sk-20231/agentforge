@@ -8,7 +8,8 @@
     ],
     "keywords": [],
     "group": "single",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "A short friendly greeting in reply."
   },
   {
     "id": "plan_002",
@@ -19,7 +20,8 @@
     ],
     "keywords": [],
     "group": "single",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "A short polite closing reply. Offering further help is fine; no task is needed."
   },
   {
     "id": "plan_003",
@@ -34,7 +36,8 @@
       "vegetarian"
     ],
     "group": "single",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Confirms that it will remember the user's vegetarian food preference."
   },
   {
     "id": "plan_004",
@@ -53,7 +56,8 @@
       "backend"
     ],
     "group": "single",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Confirms that it will remember what the user said about themselves (their name and job)."
   },
   {
     "id": "plan_005",
@@ -68,7 +72,8 @@
       "tokyo"
     ],
     "group": "single",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "A current weather report for Tokyo (temperature and/or conditions)."
   },
   {
     "id": "plan_006",
@@ -83,7 +88,8 @@
       "openai"
     ],
     "group": "single",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "One or more recent news items about OpenAI."
   },
   {
     "id": "plan_007",
@@ -101,7 +107,8 @@
       "lovelace"
     ],
     "group": "single",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "A short, correct description of Ada Lovelace (a 19th-century mathematician known for her work on Charles Babbage's Analytical Engine, often called the first computer programmer)."
   },
   {
     "id": "plan_008",
@@ -116,7 +123,8 @@
       "hash"
     ],
     "group": "single",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "A correct explanation of a hash map (key-value storage that uses a hash function for fast lookup)."
   },
   {
     "id": "plan_009",
@@ -129,7 +137,8 @@
     ],
     "keywords": [],
     "group": "single",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Says the user likes or prefers vegetarian food (the user said so earlier in this session)."
   },
   {
     "id": "plan_010",
@@ -144,7 +153,8 @@
       "remote"
     ],
     "group": "single",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Says the handbook does not cover remote work, or reports only related items it does contain (for example the 10:00 AM to 4:00 PM core hours). It must not invent a policy. Any wording that says the handbook or documents do not cover it is fine (for example 'the document does not contain information about it')."
   },
   {
     "id": "plan_011",
@@ -159,7 +169,8 @@
       "vacation"
     ],
     "group": "single",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Says the handbook does not state a number of vacation days, or reports only related items it does contain (2 days of 'Sun-Sync' leave per year; extra PTO days bought with Solar-Credits). It must not invent a number. Any wording that says the handbook or documents do not cover it is fine (for example 'the document does not contain information about it')."
   },
   {
     "id": "plan_012",
@@ -174,7 +185,8 @@
       "paris"
     ],
     "group": "dependent",
-    "dependent": true
+    "dependent": true,
+    "expected_outcome": "A 3-day Paris itinerary that takes the current Paris weather into account."
   },
   {
     "id": "plan_013",
@@ -187,7 +199,8 @@
     ],
     "keywords": [],
     "group": "dependent",
-    "dependent": true
+    "dependent": true,
+    "expected_outcome": "Names where OpenAI's CEO (Sam Altman) was born (Chicago) AND gives today's weather in that city."
   },
   {
     "id": "plan_014",
@@ -203,7 +216,8 @@
       "parental"
     ],
     "group": "multi_part",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "States the handbook's parental leave policy (16 weeks fully paid, plus a 'Sync-Up' re-entry week) AND gives recent news about parental leave laws, or says no such news was found. Both parts must be present."
   },
   {
     "id": "plan_015",
@@ -223,7 +237,8 @@
       "tokyo"
     ],
     "group": "multi_part",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "The current weather for both Paris and Tokyo."
   },
   {
     "id": "plan_016",
@@ -239,7 +254,8 @@
       "minneapolis"
     ],
     "group": "multi_part",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Confirms that it will remember the user lives in Minneapolis AND gives the current weather in Minneapolis."
   },
   {
     "id": "plan_017",
@@ -255,7 +271,8 @@
       "london"
     ],
     "group": "multi_part",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "The current weather in London AND recent tech news related to the UK, or says none was found."
   },
   {
     "id": "plan_018",
@@ -275,7 +292,8 @@
       "rag"
     ],
     "group": "multi_part",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Explains what RAG (retrieval-augmented generation) is AND reports the handbook's rule on AI tools (AI-drafted client responses must include the disclaimer 'Assisted by Solar-Intelligence v2.1.')."
   },
   {
     "id": "plan_019",
@@ -295,7 +313,8 @@
       "turing"
     ],
     "group": "multi_part",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "A short, correct description of Alan Turing AND recent AI news."
   },
   {
     "id": "plan_020",
@@ -318,7 +337,8 @@
       "tokyo"
     ],
     "group": "multi_part",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "The current weather for Paris and Tokyo AND at least one news headline about each city, or says none was found."
   },
   {
     "id": "plan_021",
@@ -335,7 +355,8 @@
       "lunch"
     ],
     "group": "multi_part",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Confirms that it will remember the user is vegetarian AND reports what the handbook says about lunch or meal benefits (Solar-Credits for cafeteria vouchers; a $75/day meal per diem when travelling), or says the handbook has no specific lunch benefit."
   },
   {
     "id": "plan_022",
@@ -351,7 +372,8 @@
       "sick"
     ],
     "group": "multi_part",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Says the handbook does not cover sick leave AND gives tech news about sick leave, or says none was found. It must not invent a sick-leave policy. Any wording that says the handbook or documents do not cover it is fine (for example 'the document does not contain information about it')."
   },
   {
     "id": "plan_023",
@@ -375,7 +397,8 @@
       "berlin"
     ],
     "group": "history",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Recent news about Berlin."
   },
   {
     "id": "plan_024",
@@ -399,7 +422,8 @@
       "adoption"
     ],
     "group": "history",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Says the handbook does not mention adoption. It must not invent an adoption policy. Any wording that says the handbook or documents do not cover it is fine (for example 'the document does not contain information about it')."
   },
   {
     "id": "plan_025",
@@ -424,7 +448,8 @@
       "rome"
     ],
     "group": "history",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "The current weather in Rome AND tech news about Rome, or says none was found."
   },
   {
     "id": "plan_026",
@@ -437,7 +462,8 @@
     ],
     "keywords": [],
     "group": "dependent",
-    "dependent": true
+    "dependent": true,
+    "expected_outcome": "Names Jane Austen as the author AND gives a summary of her birthplace (Steventon, Hampshire, England)."
   },
   {
     "id": "plan_027",
@@ -452,7 +478,8 @@
       "oslo"
     ],
     "group": "dependent",
-    "dependent": true
+    "dependent": true,
+    "expected_outcome": "Reports the current weather in Oslo. If it is raining, also gives tech news about indoor gadgets; if it is not raining, says so (no gadget news needed)."
   },
   {
     "id": "plan_028",
@@ -467,7 +494,8 @@
       "tokyo"
     ],
     "group": "dependent",
-    "dependent": true
+    "dependent": true,
+    "expected_outcome": "A packing list for a Tokyo trip that is based on Tokyo's current weather."
   },
   {
     "id": "plan_029",
@@ -487,7 +515,8 @@
       "lisbon"
     ],
     "group": "multi_part",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "The current weather in Madrid and in Lisbon AND a recommendation of which city is better for a picnic today."
   },
   {
     "id": "plan_030",
@@ -507,7 +536,8 @@
       "sydney"
     ],
     "group": "multi_part",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Says the capital of Australia is Canberra AND gives the current weather in Sydney."
   },
   {
     "id": "plan_031",
@@ -524,7 +554,8 @@
       "volunteer"
     ],
     "group": "multi_part",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Confirms that it will remember the user loves hiking AND says the handbook does not cover volunteer days. It must not invent a policy. Any wording that says the handbook or documents do not cover it is fine (for example 'the document does not contain information about it')."
   },
   {
     "id": "plan_032",
@@ -537,7 +568,8 @@
     ],
     "keywords": [],
     "group": "dependent",
-    "dependent": true
+    "dependent": true,
+    "expected_outcome": "Gives Canada's population (from Wikipedia) AND the current weather in Canada's largest city (Toronto)."
   },
   {
     "id": "plan_033",
@@ -552,7 +584,8 @@
       "chicago"
     ],
     "group": "dependent",
-    "dependent": true
+    "dependent": true,
+    "expected_outcome": "Reports the current temperature in Chicago AND suggests an indoor activity if it is below 5 degrees, or an outdoor activity otherwise."
   },
   {
     "id": "plan_034",
@@ -567,7 +600,8 @@
       "berlin"
     ],
     "group": "dependent",
-    "dependent": true
+    "dependent": true,
+    "expected_outcome": "A weekend plan for Berlin that is based on Berlin's current weather."
   },
   {
     "id": "plan_035",
@@ -580,7 +614,8 @@
     ],
     "keywords": [],
     "group": "dependent",
-    "dependent": true
+    "dependent": true,
+    "expected_outcome": "Names Christopher Nolan as the director of Inception AND lists other films he directed."
   },
   {
     "id": "plan_036",
@@ -596,7 +631,8 @@
     ],
     "keywords": [],
     "group": "documents_rule",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "A sensible answer about parental leave policy. General information about parental leave policies is enough; the company handbook's policy (16 weeks fully paid) is also fine, but neither one is required over the other."
   },
   {
     "id": "plan_037",
@@ -612,7 +648,8 @@
     ],
     "keywords": [],
     "group": "documents_rule",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "A general explanation of what parental leave is."
   },
   {
     "id": "plan_038",
@@ -636,7 +673,8 @@
       "sick"
     ],
     "group": "history",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Says the handbook does not cover sick days. It must not invent a policy. Any wording that says the handbook or documents do not cover it is fine (for example 'the document does not contain information about it')."
   },
   {
     "id": "plan_039",
@@ -660,7 +698,8 @@
       "paris"
     ],
     "group": "history",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "The current weather in Paris."
   },
   {
     "id": "plan_040",
@@ -675,7 +714,8 @@
       "expense"
     ],
     "group": "documents_rule",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Reports the handbook's travel expense limits (lodging at most $250 per night; a meal per diem of $75 per day, reduced to $25 when the hotel provides breakfast)."
   },
   {
     "id": "plan_041",
@@ -698,7 +738,8 @@
       "example.com"
     ],
     "group": "mixed_knowledge_lookup",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Explains in one sentence what RAG is AND gives the title of https://example.com ('Example Domain')."
   },
   {
     "id": "plan_042",
@@ -713,7 +754,8 @@
       "example.com"
     ],
     "group": "mixed_knowledge_lookup",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "A summary of https://example.com (a page saying the domain is for use in documentation examples)."
   },
   {
     "id": "plan_043",
@@ -733,7 +775,8 @@
       "python.org"
     ],
     "group": "mixed_knowledge_lookup",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Describes what is on the page https://www.python.org AND explains what a Python decorator is."
   },
   {
     "id": "plan_044",
@@ -753,7 +796,8 @@
       "rome"
     ],
     "group": "mixed_knowledge_lookup",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Defines machine learning AND gives the current weather in Rome."
   },
   {
     "id": "plan_045",
@@ -773,7 +817,8 @@
       "sydney"
     ],
     "group": "mixed_knowledge_lookup",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "A fun fact about octopuses AND the current weather in Sydney."
   },
   {
     "id": "plan_046",
@@ -793,6 +838,7 @@
       "remote"
     ],
     "group": "mixed_knowledge_lookup",
-    "dependent": false
+    "dependent": false,
+    "expected_outcome": "Says the handbook does not cover remote work (it may mention the 10:00 AM to 4:00 PM core hours) AND explains what a VPN is. Any wording that says the handbook or documents do not cover it is fine (for example 'the document does not contain information about it')."
   }
 ]

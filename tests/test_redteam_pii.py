@@ -63,6 +63,17 @@ class TestRegexBaselineOnAuthoredSet:
         assert "1234567890123456" in over_texts
 
 
+def test_active_engine_names_gliner_only_when_it_is_loaded(monkeypatch):
+    monkeypatch.setattr(redteam_pii, "AGENT_OUTPUT_GUARDRAIL_ENGINE", "auto")
+    monkeypatch.setattr(redteam_pii.output_guardrail, "_get_presidio", lambda: object())
+    monkeypatch.setattr(redteam_pii.output_guardrail,
+                        "AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS", False)
+    assert redteam_pii._active_engine() == "presidio"
+    monkeypatch.setattr(redteam_pii.output_guardrail,
+                        "AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS", True)
+    assert redteam_pii._active_engine() == "presidio+gliner"
+
+
 def test_active_engine_reports_regex_when_forced(monkeypatch):
     monkeypatch.setattr(redteam_pii, "AGENT_OUTPUT_GUARDRAIL_ENGINE", "regex")
     assert redteam_pii._active_engine() == "regex"

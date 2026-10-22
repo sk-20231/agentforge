@@ -129,10 +129,18 @@ AGENT_INPUT_GUARDRAIL_ENABLED = _env_flag("AGENT_INPUT_GUARDRAIL_ENABLED", True)
 AGENT_RAG_GUARDRAIL_ENABLED = _env_flag("AGENT_RAG_GUARDRAIL_ENABLED", True)
 # OUTPUT: redact PII from the agent's final reply before it is returned (see
 # agentforge.output_guardrail). Default-on CORE set = secrets / email / SSN /
-# credit-card / PERSON / ADDRESS. The AGGRESSIVE flag additionally redacts IP + phone,
-# which false-positive on legitimate technical answers, so they are OPT-IN.
+# credit-card. The AGGRESSIVE flag additionally redacts IP + phone, which
+# false-positive on legitimate technical answers, so they are OPT-IN.
 AGENT_OUTPUT_GUARDRAIL_ENABLED = _env_flag("AGENT_OUTPUT_GUARDRAIL_ENABLED", True)
 AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE = _env_flag("AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE", False)
+# PERSON + ADDRESS redaction (Presidio engine only — regex cannot see names) is
+# OPT-IN (issue #27). Names and places are usually the ANSWER, not a leak: in a
+# 92-turn run GLiNER redacted 52 PERSON spans ("you", "Turing", "Christopher
+# Nolan", "employee") and 13 ADDRESS spans ("Rome", "Sydney"), and the damaged
+# replies failed the task. The main defense against one user's data reaching
+# another is per-user memory isolation; this is a second layer. Off also means
+# the GLiNER model is never loaded (no download check, ~25 s less per process).
+AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS = _env_flag("AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS", False)
 # ENGINE selects the detector (issue #24). "auto" = use the Presidio + GLiNER ML engine
 # if the optional `[pii]` deps are installed (catches names/addresses via NER + checksum-
 # validated cards), else the always-available zero-dep regex. "regex" forces the regex

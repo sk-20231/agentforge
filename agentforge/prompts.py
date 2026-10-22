@@ -258,6 +258,23 @@ Rules:
 The live tools available to `research`:
 {tool_catalog}"""
 
+# All research parts of a multi-task plan run as ONE REACT task (one loop, one
+# prompt) instead of one loop each: REACT steps were 64% of the supervisor's
+# tokens in the 2026-10-22 on/off comparison. The user's request is included so
+# REACT also does the final step (compare, recommend) when combine is skipped.
+# The last sentence is measured: without it, a numbered list of parts made REACT
+# return its reply as a JSON object in 5 of 23 merged turns, and the user saw raw
+# JSON (reply_text keeps the chat working, but cannot make an object readable).
+SUPERVISOR_MERGED_RESEARCH_BRIEF = """Do every part of this task and answer all of them in one reply.
+
+The user's request: {user_input}
+
+Parts:
+{parts}
+
+If a later part needs the result of an earlier part, use that result. If a part cannot be done, say so for that part and still do the others.
+Write the reply as plain sentences for the user (a short list is fine). Never write the reply as JSON or as a data object."""
+
 SUPERVISOR_COMBINE_PROMPT = """You write the final reply to the user from the results of several workers.
 
 Each worker did one part of the user's request. You get the user's original request, each worker's task, and its result.

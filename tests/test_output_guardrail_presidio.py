@@ -8,6 +8,8 @@ Two layers:
     redacts a person name regex can't see. It SKIPS when the ``[pii]`` extra/model are
     unavailable (same pattern as the live MCP contract tests).
 """
+import sys
+import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -76,6 +78,15 @@ class TestPersonAddressSetting:
         analyzer = MagicMock()
         analyzer.analyze.return_value = []
         monkeypatch.setattr(output_guardrail, "_get_presidio", lambda: (analyzer, MagicMock()))
+        # _scan_presidio imports presidio_anonymizer on its first line. CI does not
+        # install the [pii] extra, so stand in for the module: these tests must run
+        # everywhere, not only where the extra happens to be installed.
+        entities = types.ModuleType("presidio_anonymizer.entities")
+        entities.OperatorConfig = MagicMock()
+        package = types.ModuleType("presidio_anonymizer")
+        package.entities = entities
+        monkeypatch.setitem(sys.modules, "presidio_anonymizer", package)
+        monkeypatch.setitem(sys.modules, "presidio_anonymizer.entities", entities)
         return analyzer
 
     def _requested(self, analyzer):

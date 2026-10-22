@@ -156,6 +156,18 @@ class TestScoreTaskCompletionJudge:
         assert r["completed"] is False
         assert "Judge error" in r["reason"]
 
+    @patch("openai.OpenAI")
+    def test_temperature_is_sent_only_when_set(self, mock_openai_cls):
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content='{"completed": true, "reason": "ok"}'))
+        ]
+        score_task_completion("q", "a", "outcome")
+        assert "temperature" not in mock_client.chat.completions.create.call_args.kwargs
+        score_task_completion("q", "a", "outcome", temperature=0)
+        assert mock_client.chat.completions.create.call_args.kwargs["temperature"] == 0
+
 
 # ---------- reconstruct_trajectory (reads the trace log) ----------
 

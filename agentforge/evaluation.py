@@ -492,6 +492,7 @@ def score_task_completion(
     expected_outcome: str,
     expected_substrings: list[str] = None,
     use_judge: bool = True,
+    temperature: float = None,
 ) -> dict:
     """Did the agent finish the task? LLM-judge, or deterministic substrings.
 
@@ -500,6 +501,10 @@ def score_task_completion(
     free, deterministic substring check instead (all ``expected_substrings``
     must appear, case-insensitively) — this is what the hermetic unit tests use
     so they never touch the API.
+
+    ``temperature`` is passed to the judge only when set. ``0`` makes the
+    verdict repeatable: in the supervisor comparison the default judge passed
+    one reply and failed an almost identical one.
 
     Returns {"completed": bool, "reason": str, "method": "judge"|"substring"}.
     """
@@ -525,6 +530,7 @@ def score_task_completion(
         f"EXPECTED OUTCOME:\n{expected_outcome}\n\n"
         f"FINAL ANSWER:\n{final_answer}"
     )
+    sampling = {} if temperature is None else {"temperature": temperature}
     try:
         response = _client.chat.completions.create(
             model=OPENAI_MODEL,
@@ -533,6 +539,7 @@ def score_task_completion(
                 {"role": "user", "content": user_message},
             ],
             response_format={"type": "json_object"},
+            **sampling,
         )
         data = json.loads(response.choices[0].message.content)
         return {

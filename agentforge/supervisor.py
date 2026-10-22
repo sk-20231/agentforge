@@ -38,6 +38,13 @@ answers from knowledge with zero tool calls, so the swap is harmless. A
 one-task plan keeps the fast, streaming ``answer`` pipeline — the swap needs
 two tasks.
 
+All research tasks of a plan then MERGE into one research task — one REACT
+loop with every brief as a numbered part — instead of one loop each. In the
+2026-10-22 on/off comparison REACT steps were 64% of the supervisor's tokens,
+and 24 of 46 turns ran as multi-task plans. The merged task gets 2 more steps
+per extra part (one lookup and one retry). If it is the only task left, its
+reply IS the turn's reply: no combine call.
+
 Security: the planner plans once, before any worker runs, so it never reads
 worker output — an injection in a fetched page cannot change the plan
 (plan-then-execute). ``combine`` has no tools; untrusted results reach it
@@ -93,6 +100,7 @@ from agentforge.memory.semantic import store_memory
 from agentforge.prompts import (
     SPOTLIGHT_INSTRUCTIONS,
     SUPERVISOR_COMBINE_PROMPT,
+    SUPERVISOR_MERGED_RESEARCH_BRIEF,
     SUPERVISOR_PLANNER_PROMPT,
     SUPERVISOR_WORKER_NAMES,
     SUPERVISOR_WORKER_TOOLS,
@@ -120,6 +128,11 @@ WORKER_INTENT = {
     "read_user_documents": "DOCS_QA",
     "answer": "ANSWER",
 }
+
+# REACT steps for a research task: the REACT default, plus this many for each
+# extra part merged into it (REACT makes one tool call per step).
+RESEARCH_STEPS = 5
+RESEARCH_STEPS_PER_EXTRA_PART = 2
 
 # Shown when the planner calls no worker and writes no text either.
 DIRECT_REPLY_FALLBACK = "Okay 🙂"
@@ -252,10 +265,11 @@ def _graph():
     return _GRAPH
 
 
-def _recursion_limit(task_count: int) -> int:
-    # The nested REACT graph inherits this limit, so it must also cover a
-    # REACT turn (2 * max_steps + 5 = 15 at the default 5 steps).
-    return max(2 * 5 + 5, task_count + 2) + 10
+def _recursion_limit(tasks: list) -> int:
+    # The nested REACT graph inherits this limit, so it must also cover the
+    # longest REACT turn (2 * max_steps + 5; a merged task has more steps).
+    steps = max((t.get("max_steps", RESEARCH_STEPS) for t in tasks), default=RESEARCH_STEPS)
+    return max(2 * steps + 5, len(tasks) + 2) + 10
 
 
 def _route_after_worker(state: _SupState) -> str:
@@ -285,7 +299,8 @@ async def _run_worker(task: dict, index: int, state: _SupState, ctx: _SupContext
     with token_meter() as meter:
         try:
             if worker == "research":
-                summary, tools = await _research(brief, state, ctx.gw, model)
+                summary, tools = await _research(
+                    brief, state, ctx.gw, model, task.get("max_steps", RESEARCH_STEPS))
             elif worker == "read_user_documents":
                 summary = await asyncio.to_thread(
                     answer_from_docs, brief, stream=False, trace_id=trace_id, model=model,
@@ -331,11 +346,12 @@ def _trust(worker: str, tools: list) -> str:
     return "trusted"
 
 
-async def _research(brief: str, state: _SupState, gw, model: str):
+async def _research(brief: str, state: _SupState, gw, model: str,
+                    max_steps: int = RESEARCH_STEPS):
     """Run the REACT graph nested in this node, on the turn's shared gateway.
     A pause inside it propagates as GraphInterrupt and pauses this turn."""
     trace_id = state["trace_id"]
-    graph_input = build_react_input(state["user_id"], brief, gw,
+    graph_input = build_react_input(state["user_id"], brief, gw, max_steps=max_steps,
                                     trace_id=trace_id, model=model)
     out = await react_graph().ainvoke(graph_input, context=ReactContext(gw=gw))
     return out["reply"], tools_called(out["messages"])
@@ -349,6 +365,11 @@ async def _combine_node(state: _SupState) -> dict:
         log_event("supervisor_combine", {"skipped": "all_failed", "workers": len(results)},
                   trace_id=trace_id)
         return {"reply": ALL_FAILED_REPLY}
+    if len(results) == 1:
+        # One task left after the research merge: its reply already answers
+        # every part, so a combine call would only rewrite it.
+        log_event("supervisor_combine", {"skipped": "single_result"}, trace_id=trace_id)
+        return {"reply": results[0]["summary"]}
 
     nonce = new_spotlight_nonce()
     parts = []
@@ -410,6 +431,30 @@ def _multi_task(task: dict) -> dict:
     return dict(task)
 
 
+def _merge_research(tasks: list, user_input: str) -> list:
+    """All research tasks become ONE, at the first one's position (see the
+    module docstring). Other tasks keep their order. Fewer than two research
+    tasks: the plan is returned unchanged."""
+    research = [t for t in tasks if t["worker"] == "research"]
+    if len(research) < 2:
+        return tasks
+    parts = "\n".join(f"{n}. {t['brief']}" for n, t in enumerate(research, 1))
+    merged = {
+        "worker": "research",
+        "brief": SUPERVISOR_MERGED_RESEARCH_BRIEF.format(user_input=user_input, parts=parts),
+        "planned_worker": ",".join(t.get("planned_worker", "research") for t in research),
+        "merged_parts": len(research),
+        "max_steps": RESEARCH_STEPS + RESEARCH_STEPS_PER_EXTRA_PART * (len(research) - 1),
+    }
+    out = []
+    for t in tasks:
+        if t["worker"] != "research":
+            out.append(t)
+        elif t is research[0]:
+            out.append(merged)
+    return out
+
+
 def _turn_gateway(tasks: list, trace_id: Optional[str], handler):
     """The turn's MCP gateway if any task needs one, else a no-op context."""
     if any(t["worker"] == "research" for t in tasks):
@@ -418,10 +463,15 @@ def _turn_gateway(tasks: list, trace_id: Optional[str], handler):
 
 
 async def _run_multi_async(user_id, user_input, tasks, trace_id, approval_handler) -> str:
-    tasks = [_multi_task(t) for t in tasks]
+    planned = len(tasks)
+    tasks = _merge_research([_multi_task(t) for t in tasks], user_input)
     thread_id = new_thread_id(PIPELINE)
     log_event("supervisor_start", {"thread_id": thread_id,
-                                   "workers": [t["worker"] for t in tasks]},
+                                   "workers": [t["worker"] for t in tasks],
+                                   "planned_tasks": planned,
+                                   "merged_research_parts": max(
+                                       (t.get("merged_parts", 1) for t in tasks
+                                        if t["worker"] == "research"), default=0)},
               trace_id=trace_id)
     initial = {"user_id": user_id, "user_input": user_input, "trace_id": trace_id,
                "tasks": tasks, "results": [], "workers_done": 0, "reply": None}
@@ -431,7 +481,7 @@ async def _run_multi_async(user_id, user_input, tasks, trace_id, approval_handle
     async with _turn_gateway(tasks, trace_id, handler) as gw:
         return await run_graph(
             _graph(), initial, thread_id=thread_id,
-            recursion_limit=_recursion_limit(len(tasks)),
+            recursion_limit=_recursion_limit(tasks),
             context=_SupContext(gw=gw),
             pipeline=PIPELINE, trace_id=trace_id, output_key="reply",
             progress_key="workers_done")
@@ -460,7 +510,7 @@ async def _resume_async(thread_id: str, decision, fallback) -> str:
     async with _turn_gateway(tasks, trace_id, handler) as gw:
         return await run_graph(
             _graph(), Command(resume=decision), thread_id=thread_id,
-            recursion_limit=_recursion_limit(len(tasks)),
+            recursion_limit=_recursion_limit(tasks),
             context=_SupContext(gw=gw),
             pipeline=PIPELINE, trace_id=trace_id, output_key="reply",
             progress_key="workers_done")

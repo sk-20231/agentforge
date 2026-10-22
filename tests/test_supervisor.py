@@ -327,6 +327,34 @@ class TestTrustAndHelpers:
         assert supervisor._multi_task({"worker": "remember", "brief": "b"}) == {
             "worker": "remember", "brief": "b"}
 
+    def test_fewer_than_two_research_tasks_are_not_merged(self):
+        tasks = [{"worker": "research", "brief": "a"}, {"worker": "remember", "brief": "b"}]
+        assert supervisor._merge_research(tasks, "q") is tasks
+
+    def test_research_tasks_merge_at_the_first_ones_position(self):
+        tasks = [{"worker": "remember", "brief": "fact"},
+                 {"worker": "research", "brief": "Weather in Paris"},
+                 {"worker": "read_user_documents", "brief": "docs"},
+                 {"worker": "research", "brief": "Explain RAG", "planned_worker": "answer"}]
+        out = supervisor._merge_research(tasks, "the request")
+        assert [t["worker"] for t in out] == ["remember", "research", "read_user_documents"]
+        merged = out[1]
+        assert "1. Weather in Paris\n2. Explain RAG" in merged["brief"]
+        assert "The user's request: the request" in merged["brief"]
+        # Measured: without this, REACT returned the reply as a JSON object.
+        assert "Never write the reply as JSON" in merged["brief"]
+        assert merged["planned_worker"] == "research,answer"
+        assert merged["merged_parts"] == 2
+        assert merged["max_steps"] == supervisor.RESEARCH_STEPS + supervisor.RESEARCH_STEPS_PER_EXTRA_PART
+
+    def test_step_budget_and_recursion_limit_grow_with_merged_parts(self):
+        tasks = [{"worker": "research", "brief": str(n)} for n in range(4)]
+        (merged,) = supervisor._merge_research(tasks, "q")
+        assert merged["max_steps"] == 5 + 2 * 3
+        # The nested REACT graph needs 2 * max_steps + 5 super-steps.
+        assert supervisor._recursion_limit([merged]) >= 2 * merged["max_steps"] + 5
+        assert supervisor._recursion_limit([{"worker": "remember", "brief": "a"}]) == 25
+
     def test_tools_called_reads_observation_messages(self):
         from agentforge.reasoning.react_engine import tools_called
         messages = [{"role": "user", "content": "question"},
@@ -423,21 +451,45 @@ def _streamlit_handler(request):
 
 
 class TestResearchWorkers:
-    def test_answer_task_runs_on_react_with_no_tool_call(self, gated, workers, combine_llm,
-                                                         monkeypatch):
-        """A planner swap (lookup given to answer) is harmless: both run on REACT."""
-        think = _react_llm(monkeypatch, _answer_steps("RAG means retrieval."),
-                           _fetch_steps("https://a.example"))
+    def test_research_and_answer_parts_run_as_one_react_loop(self, gated, workers, combine_llm,
+                                                             monkeypatch):
+        """A planner swap (lookup given to answer) stays harmless: every part
+        runs on REACT — now in ONE loop, with no combine call."""
+        think = _react_llm(monkeypatch, _fetch_steps("https://a.example"))
         tasks = [{"worker": "answer", "brief": "Explain RAG"},
                  {"worker": "answer", "brief": "Fetch https://a.example"}]
-        assert supervisor.run_multi("u1", "q", tasks, approval_handler=lambda r: True) == "COMBINED"
+        reply = supervisor.run_multi("u1", "Explain RAG and fetch a.example", tasks,
+                                     approval_handler=lambda r: True)
+        assert reply == "summary of https://a.example"   # REACT's reply, not combine's
+        combine_llm.assert_not_called()
         assert gated.executed == ["https://a.example"]
-        assert think.call_count == 3
-        first, second = _events("invoke_agent")
-        assert first["payload"]["gen_ai.agent.name"] == "research"
-        assert first["payload"]["planned_worker"] == "answer"
-        assert first["payload"]["trust"] == "trusted"      # no tool ran
-        assert second["payload"]["trust"] == "untrusted"   # fetch ran
+        assert think.call_count == 2                       # one loop: tool step + final step
+        (event,) = _events("invoke_agent")
+        assert event["payload"]["gen_ai.agent.name"] == "research"
+        assert event["payload"]["planned_worker"] == "answer,answer"
+        assert event["payload"]["trust"] == "untrusted"    # fetch ran
+        # The loop got both parts, the user's request, and the extra steps.
+        (start,) = _events("react_start")
+        assert start["payload"]["max_steps"] == 7
+        prompt = json.dumps(think.call_args_list[0].kwargs["messages"])
+        assert "1. Explain RAG" in prompt and "2. Fetch https://a.example" in prompt
+        assert "Explain RAG and fetch a.example" in prompt
+        assert _events("supervisor_combine")[-1]["payload"]["skipped"] == "single_result"
+
+    def test_merged_research_still_combines_with_other_workers(self, gated, workers,
+                                                               combine_llm, monkeypatch):
+        think = _react_llm(monkeypatch, _answer_steps("Paris 18 C, Tokyo 21 C."))
+        tasks = [{"worker": "research", "brief": "Weather in Paris"},
+                 {"worker": "remember", "brief": "The user is vegetarian."},
+                 {"worker": "research", "brief": "Weather in Tokyo"}]
+        assert supervisor.run_multi("u1", "q", tasks) == "COMBINED"
+        assert think.call_count == 1                       # one REACT loop for both lookups
+        assert [e["payload"]["gen_ai.agent.name"] for e in _events("invoke_agent")] == [
+            "research", "remember"]
+        text = _combine_input(combine_llm)
+        assert text.index("Paris 18 C, Tokyo 21 C.") < text.index(SAVED)
+        start = _events("supervisor_start")[-1]["payload"]
+        assert start["planned_tasks"] == 3 and start["merged_research_parts"] == 2
 
     def test_one_gateway_per_turn_and_none_without_research(self, gated, workers, combine_llm,
                                                             monkeypatch):
@@ -496,12 +548,13 @@ class TestResearchWorkers:
         assert gated.executed == []
         workers.store.assert_called_once()
 
-    def test_a_later_research_worker_asks_again(self, gated, workers, combine_llm,
-                                                monkeypatch):
-        """The resume decision settles ONLY the stored call: the next worker's
-        gated call goes back to the front-end and gets its own card."""
-        _react_llm(monkeypatch, _fetch_steps("https://a.example"),
-                   _fetch_steps("https://b.example"))
+    def test_a_later_gated_call_in_the_merged_loop_asks_again(self, gated, workers,
+                                                              combine_llm, monkeypatch):
+        """The resume decision settles ONLY the stored call: the merged loop's
+        next gated call goes back to the front-end and gets its own card."""
+        fetch_a, fetch_b = _fetch_steps("https://a.example")[0], _fetch_steps("https://b.example")[0]
+        final = json.dumps({"thought": "done", "action": {"type": "final"}, "reply": "both pages"})
+        _react_llm(monkeypatch, [fetch_a, fetch_b, final])
         tasks = [{"worker": "research", "brief": "a"}, {"worker": "research", "brief": "b"}]
         with pytest.raises(ApprovalRequired) as first:
             supervisor.run_multi("u1", "q", tasks, approval_handler=_streamlit_handler)
@@ -512,7 +565,7 @@ class TestResearchWorkers:
         assert second.value.request.arguments == {"url": "https://b.example"}
         assert gated.executed == ["https://a.example"]
         assert supervisor.resume(second.value.thread_id, True,
-                                 approval_handler=_streamlit_handler) == "COMBINED"
+                                 approval_handler=_streamlit_handler) == "both pages"
         assert gated.executed == ["https://a.example", "https://b.example"]
 
     def test_no_handler_denies_by_default(self, gated, workers, combine_llm, monkeypatch):

@@ -23,6 +23,7 @@ from agentforge.prompts import (
     OBSERVATION_COMPRESSION_PROMPT,
     OUTPUT_SCHEMA,
     REACT_TOOL_EFFICIENCY,
+    REACT_TOOL_ERROR_RECOVERY,
     SPOTLIGHT_INSTRUCTIONS,
 )
 from agentforge.hitl_graph import (
@@ -215,6 +216,7 @@ def build_react_input(user_id: str, user_input: str, gw, max_steps: int = 5,
     messages = build_prompt(user_input, memory_chunks)
     messages.append({"role": "system", "content": render_tool_catalog(gw.catalog)})
     messages.append({"role": "system", "content": REACT_TOOL_EFFICIENCY})
+    messages.append({"role": "system", "content": REACT_TOOL_ERROR_RECOVERY})
     messages.append({"role": "system", "content": OUTPUT_SCHEMA})
     log_event("react_tools_discovered", {"tools": [t["name"] for t in gw.catalog]},
               trace_id=trace_id)

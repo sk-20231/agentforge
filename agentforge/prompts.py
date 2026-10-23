@@ -87,6 +87,21 @@ Tool-efficiency rules — you have a LIMITED number of reasoning steps:
   a document once the user's question is answerable.
 """
 
+# Issue #65: after one tool error the loop ended the turn with "I'm unable to
+# access that information" — even for questions the model could answer itself
+# (the classifier path, which answered from knowledge, passed the same cases).
+# One retry with a changed input, then a labelled answer from knowledge.
+REACT_TOOL_ERROR_RECOVERY = """
+When a tool returns an error or nothing useful:
+- Try ONCE more with a different input (for example a shorter, more general
+  topic name) or a different tool.
+- If that also fails, answer from your general knowledge and say briefly that
+  the answer is not from a live source. Do not reply only that you cannot
+  access the information.
+- Live data (current weather, today's news) cannot come from general knowledge:
+  for those, say plainly that the lookup failed.
+"""
+
 # Issue #8 (query-focused observation compression): an oversized tool
 # observation is distilled relative to THE USER'S QUESTION before it enters
 # the message history. The input is untrusted data, so the compressor gets the

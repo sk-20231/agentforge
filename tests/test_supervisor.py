@@ -15,6 +15,7 @@ import pytest
 from agentforge import supervisor
 from agentforge.approval import ApprovalRequest, ApprovalRequired
 from agentforge.logger import log_token_usage, token_meter
+from agentforge.prompts import EARLIER_CONVERSATION_NOTE
 
 
 # ------------------------------------ helpers ------------------------------------
@@ -80,9 +81,22 @@ class TestPlanTurn:
         assert kwargs["temperature"] == 0
         assert [t["function"]["name"] for t in kwargs["tools"]] == list(
             supervisor.SUPERVISOR_WORKER_NAMES)
-        # History reaches the planner (to resolve "there"/"it"), before the request.
-        assert kwargs["messages"][1] == {"role": "user", "content": "earlier"}
+        # History reaches the planner (to resolve "there"/"it"), before the request,
+        # as ONE wrapped data block — not as a chat turn it could re-plan (#56).
+        block = kwargs["messages"][1]
+        assert block["role"] == "system"
+        assert block["content"].startswith(EARLIER_CONVERSATION_NOTE)
+        assert "user: earlier" in block["content"]
+        assert "<untrusted_data_" in block["content"]
+        assert [m for m in kwargs["messages"] if m["role"] == "user"] == [
+            {"role": "user", "content": "q"}]
         assert kwargs["messages"][-1] == {"role": "user", "content": "q"}
+
+    def test_no_history_means_no_block(self, planner_llm):
+        planner_llm.return_value = _planner_response([_tool_call("answer", "Say hi")])
+        supervisor.plan_turn("q")
+        messages = planner_llm.call_args.kwargs["messages"]
+        assert [m["role"] for m in messages] == ["system", "user"]
 
     def test_no_tool_call_is_a_direct_reply(self, planner_llm):
         planner_llm.return_value = _planner_response(None, content=" Hello! ")

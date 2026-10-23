@@ -25,6 +25,7 @@ from agentforge.prompts import (
     REACT_TOOL_EFFICIENCY,
     REACT_TOOL_ERROR_RECOVERY,
     SPOTLIGHT_INSTRUCTIONS,
+    earlier_conversation_message,
 )
 from agentforge.hitl_graph import (
     CHECKPOINTER,
@@ -55,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 def react_loop(user_id: str, user_input: str, max_steps: int = 5,
                approval_handler=None, trace_id: str = None,
-               model: str = None) -> str:
+               model: str = None, history: list = None) -> str:
     """Core ReAct reasoning loop (think → act → observe → repeat).
 
     Public entry point. Existing positional args are unchanged, so callers
@@ -72,10 +73,14 @@ def react_loop(user_id: str, user_input: str, max_steps: int = 5,
     run_agent routes it to the frontier tier; the step-level reasoning calls use
     it. The observation-compressor is a routine sub-task and stays on the small
     model deliberately (see _maybe_compress_observation).
+    ``history`` is the turn's (trimmed) chat history, given to the model as one
+    wrapped data block so a follow-up like "and the news there?" can be
+    resolved (issue #59). None → no block, as before.
     """
     return run_interruptible(_react_loop_async(user_id, user_input, max_steps,
                                                approval_handler=approval_handler,
-                                               trace_id=trace_id, model=model))
+                                               trace_id=trace_id, model=model,
+                                               history=history))
 
 
 def resume_react_loop(thread_id: str, decision,
@@ -178,7 +183,7 @@ def _recursion_limit(max_steps: int) -> int:
 
 async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5,
                             approval_handler=None, trace_id: str = None,
-                            model: str = None) -> str:
+                            model: str = None, history: list = None) -> str:
     """Async ReAct loop with tools served over MCP (Step 17c.2).
 
     Tools are discovered at runtime and rendered into the prompt
@@ -197,23 +202,29 @@ async def _react_loop_async(user_id: str, user_input: str, max_steps: int = 5,
                if approval_handler is not None else None)
     async with mcp_gateway(trace_id, approval_handler=handler) as gw:
         initial = build_react_input(user_id, user_input, gw, max_steps=max_steps,
-                                    trace_id=trace_id, model=model)
+                                    trace_id=trace_id, model=model, history=history)
         return await _run(initial, new_thread_id("react"), max_steps, gw, trace_id)
 
 
 def build_react_input(user_id: str, user_input: str, gw, max_steps: int = 5,
-                      trace_id: str = None, model: str = None) -> dict:
+                      trace_id: str = None, model: str = None,
+                      history: list = None) -> dict:
     """The initial graph state for one ReAct turn, built inside an open gateway.
 
     Shared by ``react_loop`` and the supervisor's research worker (Step 21.2),
     which runs this graph nested inside its own (``react_graph()`` with
     ``ReactContext``). The prompt is built once, with the live tool catalog,
     so the model can only reference tools that are actually served this turn.
+    The supervisor's workers pass no ``history``: their brief is self-contained.
     """
     memory_chunks = get_relevant_memories(user_id, user_input)
-    log_event("react_start", {"user_input": user_input, "max_steps": max_steps},
+    earlier = earlier_conversation_message(history)
+    log_event("react_start", {"user_input": user_input, "max_steps": max_steps,
+                              "history_messages": len(history or [])},
               trace_id=trace_id)
     messages = build_prompt(user_input, memory_chunks)
+    if earlier:
+        messages.insert(len(messages) - 1, earlier)  # just before the user's message
     messages.append({"role": "system", "content": render_tool_catalog(gw.catalog)})
     messages.append({"role": "system", "content": REACT_TOOL_EFFICIENCY})
     messages.append({"role": "system", "content": REACT_TOOL_ERROR_RECOVERY})

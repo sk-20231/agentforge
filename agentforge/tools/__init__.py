@@ -42,6 +42,7 @@ from agentforge.prompts import (
     OUTPUT_SCHEMA,
     SPOTLIGHT_INSTRUCTIONS,
     SYSTEM_PROMPT,
+    earlier_conversation_message,
 )
 from agentforge.tools import news, weather, wikipedia
 
@@ -97,8 +98,11 @@ get_top_news = news.get_top_news
 
 # -------------------- PROMPT BUILDER --------------------
 
-def build_messages(user_id: str, user_input: str):
+def build_messages(user_id: str, user_input: str, history: list = None):
     memories = get_relevant_memories(user_id, user_input)
+    # Issue #59: the earlier turns, as one wrapped data block, so "there" in a
+    # follow-up can be resolved. No history → no block, as before.
+    earlier = earlier_conversation_message(history)
 
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -107,6 +111,7 @@ def build_messages(user_id: str, user_input: str):
             "role": "system",
             "content": f"{MEMORY_INSTRUCTIONS}\n\nRelevant memories:\n{memories}",
         },
+        *([earlier] if earlier else []),
         {"role": "user", "content": user_input},
         {"role": "system", "content": OUTPUT_SCHEMA},
     ]
@@ -402,14 +407,17 @@ async def _resume_tool_loop_async(thread_id: str, decision, fallback=None) -> st
 # -------------------- MAIN ENTRY --------------------
 
 def run_llm_with_tools(user_id: str, user_input: str, trace_id: str = None,
-                       approval_handler=None, model: str = None) -> str:
+                       approval_handler=None, model: str = None,
+                       history: list = None) -> str:
     """Discover MCP tools at runtime and execute the (MCP-only) tool loop.
 
     ``model`` (Step 28) is the routed model for this turn; None → OPENAI_MODEL,
     so pre-routing callers are unaffected. ACT is a routine intent (small tier),
     but a low-confidence route can still hand the frontier model here.
+    ``history`` (issue #59) is the turn's trimmed chat history; None → none.
     """
-    messages = build_messages(user_id, user_input)
+    messages = build_messages(user_id, user_input, history=history)
+    log_event("act_start", {"history_messages": len(history or [])}, trace_id=trace_id)
     return run_interruptible(_run_tool_loop(messages, trace_id,
                                             approval_handler=approval_handler,
                                             user_id=user_id, model=model))

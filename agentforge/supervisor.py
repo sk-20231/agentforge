@@ -104,6 +104,7 @@ from agentforge.prompts import (
     SUPERVISOR_PLANNER_PROMPT,
     SUPERVISOR_WORKER_NAMES,
     SUPERVISOR_WORKER_TOOLS,
+    earlier_conversation_message,
 )
 from agentforge.rag.qa import answer_from_docs
 from agentforge.reasoning.react_engine import (
@@ -170,11 +171,16 @@ def plan_turn(user_input: str, history: list = None, trace_id: str = None) -> Op
 
     The planner sees the (already trimmed) history so it can turn "there" or
     "it" into real names inside each brief; the workers never see it.
+
+    The history arrives as ONE wrapped data block, not as chat turns (issue
+    #56): as turns, the planner re-planned the earlier request ("weather in
+    Berlin") next to the new one ("news there"). Same block as ACT/REACT get.
     """
     system = SUPERVISOR_PLANNER_PROMPT.format(
         max_workers=AGENT_SUPERVISOR_MAX_WORKERS,
         tool_catalog=tool_catalog_for_classifier())
-    messages = [{"role": "system", "content": system}, *(history or []),
+    earlier = earlier_conversation_message(history)
+    messages = [{"role": "system", "content": system}, *([earlier] if earlier else []),
                 {"role": "user", "content": user_input}]
     start = time.perf_counter()
     try:

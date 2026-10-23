@@ -93,7 +93,7 @@ def stream_llm_answer(user_input: str, trace_id: str = None) -> Iterator[str]:
 
 def run_react_agent(user_id: str, user_input: str, max_steps: int = 5,
                     approval_handler=None, trace_id: str = None,
-                    model: str = None) -> str:
+                    model: str = None, history: list = None) -> str:
     """Delegates to the memory-aware ReAct loop.
 
     ``model`` (Step 28) is the routed model — REACT is the hard intent, so
@@ -101,7 +101,7 @@ def run_react_agent(user_id: str, user_input: str, max_steps: int = 5,
     """
     return react_loop(user_id, user_input, max_steps,
                       approval_handler=approval_handler, trace_id=trace_id,
-                      model=model)
+                      model=model, history=history)
 
 VALID_INTENTS = frozenset({"REMEMBER", "ACT", "REACT", "ANSWER", "IGNORE", "RESPOND_WITH_MEMORY", "DOCS_QA"})
 
@@ -339,7 +339,7 @@ def _run_pipeline(intent: str, memory_candidate, route, user_id: str, user_input
         with Span("act_tool_pipeline", trace_id=tid) as span:
             tool_output = run_llm_with_tools(user_id, user_input, trace_id=tid,
                                              approval_handler=approval_handler,
-                                             model=route.model)
+                                             model=route.model, history=safe_history)
             try:
                 tool_output = json.loads(tool_output)
             except json.JSONDecodeError:
@@ -368,7 +368,8 @@ def _run_pipeline(intent: str, memory_candidate, route, user_id: str, user_input
             # turn and per-trace cost reports undercounted REACT turns.
             result = run_react_agent(user_id, user_input,
                                      approval_handler=approval_handler,
-                                     trace_id=tid, model=route.model)
+                                     trace_id=tid, model=route.model,
+                                     history=safe_history)
             span.payload = {"reply_length": len(result)}
         log_event("trace_end", {"intent": intent}, trace_id=tid)
         return _scan_output(result, tid)

@@ -115,6 +115,84 @@ class TestWikipediaLookup:
         with pytest.raises(ValueError, match="non-empty string"):
             wikipedia_lookup("")
 
+    def test_whitespace_topic_raises(self):
+        with pytest.raises(ValueError, match="non-empty string"):
+            wikipedia_lookup("   ")
+
+    # --- issue #65: a topic that is not an exact page title ---
+
+    @staticmethod
+    def _not_found():
+        return urllib.error.HTTPError(url="", code=404, msg="Not Found", hdrs=None, fp=None)
+
+    @staticmethod
+    def _urls(mock_urlopen):
+        return [c.args[0].full_url for c in mock_urlopen.call_args_list]
+
+    @patch("agentforge.tools.wikipedia.urllib.request.urlopen")
+    def test_exact_title_does_not_search(self, mock_urlopen):
+        mock_urlopen.return_value = self._mock_response({
+            "title": "Population of Canada", "extract": "Canada has 41 million people.",
+        })
+        wikipedia_lookup("Population of Canada")
+        assert mock_urlopen.call_count == 1
+
+    @patch("agentforge.tools.wikipedia.urllib.request.urlopen")
+    def test_near_miss_topic_uses_top_search_hit(self, mock_urlopen):
+        mock_urlopen.side_effect = [
+            self._not_found(),
+            self._mock_response({"pages": [
+                {"key": "Population_of_Canada", "title": "Population of Canada"}]}),
+            self._mock_response({
+                "title": "Population of Canada", "extract": "Canada has 41 million people.",
+            }),
+        ]
+        result = wikipedia_lookup("current population of Canada")
+
+        assert result == "Population of Canada: Canada has 41 million people."
+        summary, search, hit = self._urls(mock_urlopen)
+        assert "/w/rest.php/v1/search/page?" in search
+        assert "q=current+population+of+Canada" in search
+        assert hit.endswith("/page/summary/Population_of_Canada")
+
+    @patch("agentforge.tools.wikipedia.urllib.request.urlopen")
+    def test_no_search_hit_raises_not_found(self, mock_urlopen):
+        mock_urlopen.side_effect = [self._not_found(), self._mock_response({"pages": []})]
+        with pytest.raises(ValueError, match="No Wikipedia article found for 'asdfgh'"):
+            wikipedia_lookup("asdfgh")
+
+    @patch("agentforge.tools.wikipedia.urllib.request.urlopen")
+    def test_unexpected_search_shape_raises_not_found(self, mock_urlopen):
+        mock_urlopen.side_effect = [self._not_found(),
+                                    self._mock_response({"pages": {"0": "Canada"}})]
+        with pytest.raises(ValueError, match="No Wikipedia article found"):
+            wikipedia_lookup("canada stuff")
+
+    @patch("agentforge.tools.wikipedia.urllib.request.urlopen")
+    def test_failed_search_raises_not_found(self, mock_urlopen):
+        mock_urlopen.side_effect = [self._not_found(),
+                                    urllib.error.URLError("connection reset")]
+        with pytest.raises(ValueError, match="No Wikipedia article found"):
+            wikipedia_lookup("parental leave policy")
+
+    @patch("agentforge.tools.wikipedia.urllib.request.urlopen")
+    def test_search_hit_without_a_page_raises_not_found(self, mock_urlopen):
+        mock_urlopen.side_effect = [
+            self._not_found(),
+            self._mock_response({"pages": [{"key": "Gone", "title": "Gone"}]}),
+            self._not_found(),
+        ]
+        with pytest.raises(ValueError, match="No Wikipedia article found"):
+            wikipedia_lookup("gone page")
+
+    @patch("agentforge.tools.wikipedia.urllib.request.urlopen")
+    def test_server_error_does_not_search(self, mock_urlopen):
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            url="", code=503, msg="Unavailable", hdrs=None, fp=None)
+        with pytest.raises(ValueError, match=r"HTTP 503"):
+            wikipedia_lookup("Python")
+        assert mock_urlopen.call_count == 1
+
 
 class TestWeather:
     """Tests for the get_weather tool (mocked, no real HTTP calls)."""

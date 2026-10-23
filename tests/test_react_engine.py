@@ -518,6 +518,24 @@ class TestObservationCompression:
         sys_contents = [m["content"] for m in messages if m["role"] == "system"]
         assert REACT_TOOL_EFFICIENCY in sys_contents
 
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_tool_error_recovery_rules_are_in_the_prompt(self, mock_client, mock_mem,
+                                                         mock_log):
+        """Issue #65: after a tool error the model retries once, then answers
+        from knowledge instead of only saying it cannot access the information."""
+        from agentforge.prompts import REACT_TOOL_ERROR_RECOVERY
+        mock_client.chat.completions.create.return_value = self._llm(self._FINAL_STEP)
+
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(_FakeGateway()):
+            react_loop("u1", "hello", max_steps=1)
+
+        messages = mock_client.chat.completions.create.call_args.kwargs["messages"]
+        sys_contents = [m["content"] for m in messages if m["role"] == "system"]
+        assert REACT_TOOL_ERROR_RECOVERY in sys_contents
+
 
 class TestReactTraceId:
     """Regression guards for issue #7: run_agent's trace_id must reach every

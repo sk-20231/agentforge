@@ -8,6 +8,7 @@ from openai import OpenAI
 from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
 from agentforge.memory.semantic import load_memory
 from agentforge.logger import log_token_usage
+from agentforge.prompts import SPOTLIGHT_INSTRUCTIONS, history_for_chat
 
 _client = None  # created on first API call, not at import time
 
@@ -67,7 +68,12 @@ def answer_with_memory(
         },
     ]
     if history:
-        messages.extend(history)
+        # Earlier assistant turns are external text re-entering the prompt (see
+        # prompts.history_for_chat); the user's own turns stay as real messages.
+        # The wrapped turns need the same spotlight rules every other pipeline
+        # gives the model — the wrap's one-line preamble alone did not hold (3/3).
+        messages.append({"role": "system", "content": SPOTLIGHT_INSTRUCTIONS})
+        messages.extend(history_for_chat(history))
     messages.append({"role": "user", "content": user_input})
 
     if stream:

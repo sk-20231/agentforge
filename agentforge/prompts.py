@@ -93,15 +93,23 @@ Tool-efficiency rules — you have a LIMITED number of reasoning steps:
 # access that information" — even for questions the model could answer itself
 # (the classifier path, which answered from knowledge, passed the same cases).
 # One retry with a changed input, then a labelled answer from knowledge.
+# Issue #70: with the live-data bullet listed beside the retry, the model read
+# it as "for news, report the failure now" — after a refused fetch of a news
+# site it stopped (7 of 8 runs) although get_top_news was available. So the
+# retry is stated as step 1 for EVERY kind of request, and both fallbacks are
+# step 2.
 REACT_TOOL_ERROR_RECOVERY = """
-When a tool returns an error or nothing useful:
-- Try ONCE more with a different input (for example a shorter, more general
-  topic name) or a different tool.
-- If that also fails, answer from your general knowledge and say briefly that
-  the answer is not from a live source. Do not reply only that you cannot
-  access the information.
-- Live data (current weather, today's news) cannot come from general knowledge:
-  for those, say plainly that the lookup failed.
+When a tool returns an error or nothing useful, do these steps in order:
+1. Always try ONE more source first — also for live data such as news or
+   weather. Use a different tool that can give the same kind of information,
+   or a different input (for example a shorter, more general topic name).
+   Do not fetch a website again after it refused once.
+2. Only if that second try also fails:
+   - For facts you know (people, places, definitions, history), answer from
+     your general knowledge and say briefly that it is not from a live source.
+   - For live data (current weather, today's news), say plainly that the
+     lookup failed.
+Never end with "I cannot access the information" before step 1 is done.
 """
 
 # Issue #8 (query-focused observation compression): an oversized tool

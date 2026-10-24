@@ -409,9 +409,21 @@ class MCPGateway:
             text = " ".join(c.text for c in result.content if hasattr(c, "text"))
             duration_ms = (time.perf_counter() - start) * 1000
             if result.isError:
+                # Issue #70: an error result is server-written text too, so it
+                # takes the SAME path as a success — sanitize, guardrail, nonce
+                # wrap. Returned raw, it reached the model as if it were ours:
+                # mcp-server-fetch's robots.txt refusal says "The assistant must
+                # let the user know that it failed…", and the model obeyed it
+                # (stopped without trying another source, 7 of 8 runs). A hostile
+                # server could put anything there. Only the prefix is ours.
                 self._audit(tool_name, server, trusted, arg_keys, "tool_error",
                             result_len=len(text), duration_ms=duration_ms)
-                return f"Tool error: {text}"
+                if not trusted:
+                    text = sanitize_external_block(text)
+                guard_block = self._guardrail_block(text, tool_name, server, trusted, arg_keys)
+                if guard_block is not None:
+                    return guard_block
+                return "Tool error: " + wrap_untrusted(text, source=server, nonce=self.nonce)
             # Untrusted (third-party) output reaches us un-sanitized — strip the
             # machine-level tricks (control / zero-width chars) before wrapping
             # (Step 17e gap B). Our own tools already sanitize content-aware, so we
@@ -437,7 +449,10 @@ class MCPGateway:
             duration_ms = (time.perf_counter() - start) * 1000
             self._audit(tool_name, server, trusted, arg_keys, "exception",
                         error=str(exc), duration_ms=duration_ms)
-            return f"MCP tool error: {exc}"
+            # A protocol error's message is written by the server too (JSON-RPC
+            # error.message), so it gets the same wrap (issue #70).
+            return "MCP tool error: " + wrap_untrusted(str(exc), source=server,
+                                                       nonce=self.nonce)
 
     def _guardrail_block(self, text: str, tool_name: str, server: str, trusted: bool,
                          arg_keys) -> Optional[str]:

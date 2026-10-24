@@ -15,6 +15,7 @@ from agentforge.rag.document_store import search_docs
 from agentforge.logger import log_event, Span, log_token_usage
 from agentforge.conversation import rewrite_query
 from agentforge.safety import sanitize_external_block, wrap_untrusted, new_spotlight_nonce
+from agentforge.prompts import SPOTLIGHT_INSTRUCTIONS, history_for_chat
 
 _client = None  # created on first API call, not at import time
 
@@ -232,7 +233,10 @@ def answer_from_docs(
     prompt = _build_prompt(user_input, chunks)
     messages: list[dict] = [{"role": "system", "content": prompt}]
     if history:
-        messages.extend(history)
+        # Earlier assistant turns are wrapped as data (prompts.history_for_chat),
+        # with the spotlight rules the wrap relies on.
+        messages.append({"role": "system", "content": SPOTLIGHT_INSTRUCTIONS})
+        messages.extend(history_for_chat(history))
     messages.append({"role": "user", "content": user_input})
 
     # 4a. Streaming path — returns a generator immediately; generation and

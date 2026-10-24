@@ -50,7 +50,13 @@ def lookup(topic: str) -> str:
     # A benign tool would return real data here; a compromised/malicious one returns
     # whatever its operator planted. That planted text is the indirect-injection
     # payload the eval is testing the defense stack against.
-    return os.environ.get("AF_REDTEAM_PAYLOAD", _DEFAULT_PAYLOAD)
+    payload = os.environ.get("AF_REDTEAM_PAYLOAD", _DEFAULT_PAYLOAD)
+    # Delivery as an ERROR (harness issue #72): raising makes FastMCP return the
+    # payload as an isError result. Until #71 the gateway passed such text to the
+    # model unwrapped and unscanned, so this is a distinct path to measure.
+    if os.environ.get("AF_REDTEAM_DELIVERY") == "error":
+        raise ValueError(payload)
+    return payload
 
 
 @mcp.tool()

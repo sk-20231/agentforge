@@ -32,6 +32,7 @@ An interactive agent (CLI or Streamlit UI) that can:
 - **Use tools over MCP** — Wikipedia, weather (open-meteo), and HackerNews run as our own MCP servers, plus a third-party `fetch` server consumed over the protocol. All tool output is sanitized and wrapped as untrusted data to defend against indirect prompt injection; untrusted third-party servers also get a client-side SSRF URL guard
 - **Zero hardcoded tools** — both the ACT and ReAct pipelines discover and call every tool at runtime over MCP through a shared gateway; adding a tool means adding a server, not editing the agent
 - **Multi-step reasoning** — ReAct (Reason + Act) loop for complex tasks
+- **Split multi-part requests** — an opt-in planner–worker supervisor gives each part of a request to a worker and combines the results; measured before any default decision (see [decision #7](#7-supervisor--a-planner-above-the-pipelines-measured-before-it-was-turned-on))
 - **Route by difficulty** — reuse the intent label to send routine turns to a small model and escalate only multi-step reasoning to a frontier model (off by default; opt in per your bill)
 - **Answer from documents (RAG)** — chunk, embed, retrieve, generate with a citation guardrail that strips hallucinated references
 - **Personalize** answers with stored user facts
@@ -48,8 +49,9 @@ An interactive agent (CLI or Streamlit UI) that can:
 flowchart TD
     A[User Input] --> B[run_agent]
     B --> C[trim_history<br/>token budget]
-    C --> D[classify_intent<br/>LLM call - JSON mode]
+    C --> D[classify_intent<br/>LLM call - JSON mode<br/>or plan_turn when the supervisor is on]
     D --> E{Intent?}
+    E -->|2+ tasks, supervisor on| S[supervisor graph<br/>run_worker ⟲ → combine]
     E -->|REMEMBER| F[store_memory<br/>embed + persist]
     E -->|ACT| G[run_llm_with_tools<br/>LangGraph: pick → dispatch → followup]
     E -->|REACT| H[react_loop<br/>LangGraph: think ⇄ act]
@@ -62,6 +64,7 @@ flowchart TD
     I --> L
     J --> L
     K --> L
+    S --> L
     L --> M[log event<br/>tokens + cost + latency]
 ```
 
@@ -84,6 +87,7 @@ Both tool pipelines reach their tools over MCP through one gateway, and both run
 | **Indirect prompt injection defences** | [`tools/_safety.py`](agentforge/tools/_safety.py) | Sanitize + wrap external text as `untrusted_data` so model treats it as data, not instruction |
 | **ReAct reasoning** | [`reasoning/react_engine.py`](agentforge/reasoning/react_engine.py) | Multi-step tasks need think-act-observe loops |
 | **Human-in-the-loop with LangGraph** (`interrupt()` + checkpointer) | [`hitl_graph.py`](agentforge/hitl_graph.py) + [`approval.py`](agentforge/approval.py) | A gated tool call pauses the graph; the human's decision resumes the *stored* call. LLM calls sit in nodes that never pause, so a resume never regenerates the approved call |
+| **Planner–worker supervisor (LangGraph)** | [`supervisor.py`](agentforge/supervisor.py) + [`supervisor_compare.py`](agentforge/supervisor_compare.py) | Workers as tools, plan once, results re-enter as untrusted data; on/off measured end to end before deciding the default |
 | **RAG (retrieval-augmented generation)** | [`rag/`](agentforge/rag/) | Ground answers in a real corpus, not model memory |
 | **Chunking with overlap** | [`rag/document_store.py — chunk_text`](agentforge/rag/document_store.py) | Retrieval quality depends on chunk boundaries |
 | **Citation guardrails** | [`rag/qa.py — _strip_invalid_citations`](agentforge/rag/qa.py) | Deterministic safety layer on top of probabilistic output |
@@ -190,6 +194,28 @@ See [`router.py`](agentforge/router.py) and [`logger.py — compute_routing_summ
 
 ---
 
+### 7. Supervisor — a planner above the pipelines, measured before it was turned on
+
+The intent classifier (decision #1) picks ONE pipeline per message. A two-part request — "what does the handbook say about parental leave, and what's in the news about leave laws?" — got one pipeline, and half of the request was silently dropped. The supervisor fixes that: one LLM call splits the request into tasks and gives each to a worker (memory, research, the user's documents, or a plain answer). One task → the ordinary pipeline runs unchanged. Two or more → a LangGraph graph runs the workers and a combine step writes the reply.
+
+Three choices worth explaining:
+
+- **It replaces the classifier instead of sitting behind one of its labels.** The classifier was already a one-shot supervisor that never saw a result. Putting a planner behind the `REACT` label would have made it a "REACT splitter" and forced the classifier to draw a fragile line between the two.
+- **Workers are tools.** The planner's "plan" is a set of parallel tool calls, one per worker — the pattern LangChain now recommends over its `langgraph-supervisor` library. The graph is our own, so the node-boundary rule from decision #5 and the trust marking of worker results stay under our control.
+- **Plan once, then execute.** The planner never reads a worker's output inside the turn. Worker results reach the combine step nonce-wrapped as untrusted data, so a poisoned tool result cannot steer the plan. The combine model has no tools.
+
+**The small-model planner has measured limits, and the design makes them harmless rather than rare.** On gpt-4o-mini it writes self-contained task briefs 98–100% of the time but cannot tell dependent parts from independent ones (0 of 10 across three prompt designs), and sometimes hands a lookup to the no-tools `answer` worker. So all research parts of a plan run as ONE ReAct task, which chains lookups itself, and in multi-task plans `answer` tasks also run on ReAct. A wrong label then costs a little, not the answer.
+
+**It was measured before any default decision, against criteria fixed in advance:** correctness on ≥ off, the multi-part wins hold across two runs, tokens on ≤ 1.6× off, and no new successful injection with the supervisor on. The cost limit started at 1.3×; that figure had no budget behind it, so it was raised to 1.6× after the first measurement — stated here because moving a target after seeing numbers is exactly the thing to be open about.
+
+Final run (46 cases, both arms interleaved, LLM judge at temperature 0, gpt-4o-mini): **38 vs 34 of 46 answered correctly, 1.69× tokens per turn, +4.4 s mean latency.** Red team (33 indirect-injection attacks, classifier on): 0 of 33 succeeded with the supervisor off, 1 of 33 on — and that one reproduced 3 of 3 on the classifier path too, so it was a pre-existing gap (earlier assistant turns reached the chat pipelines unwrapped), fixed separately, not a supervisor regression.
+
+**Result: three of four criteria pass; the cost criterion fails (1.69× against a 1.6× limit). So the supervisor stays off by default.** Four more correct answers in 46 cost about $0.0003 more per turn at these prices — a bargain in absolute terms, but the criteria were fixed before the final run, and the point of fixing them was not to move them afterwards. `AGENT_SUPERVISOR_ENABLED=true` turns it on; the two harnesses below are how to re-measure it after the next cost change.
+
+See [`supervisor.py`](agentforge/supervisor.py), the planner eval (`python -m agentforge.evaluation --planner`) and the end-to-end comparison (`python -m agentforge.supervisor_compare`).
+
+---
+
 ## Project structure
 
 ```
@@ -201,6 +227,8 @@ agentforge/
 │   ├── main.py                   # Intent classification + agent orchestrator + resume entry point
 │   ├── prompts.py                # System prompts and structured output schema
 │   ├── router.py                 # Difficulty-based model routing (intent label as the signal)
+│   ├── supervisor.py             # Planner–worker supervisor (opt-in): plan once, workers as tools, combine
+│   ├── supervisor_compare.py     # Supervisor on vs off, end to end (the measurement behind decision #7)
 │   ├── reply.py                  # Normalizes the model's reply field to text
 │   ├── mcp_client.py             # MCP gateway — the single trust boundary for every tool call
 │   ├── safety.py                 # Sanitize, nonce spotlight wrap, SSRF URL guard
@@ -305,12 +333,14 @@ All settings read from environment variables (with defaults) in [`config.py`](ag
 | `AGENT_LOG_FILE` | `agent_logs.jsonl` | Event log file |
 | `AGENT_CORPUS_FILE` | `corpus.json` | RAG document corpus file |
 | `HISTORY_TOKEN_BUDGET` | `2000` | Max tokens kept in history before trimming |
+| `AGENT_SUPERVISOR_ENABLED` | `false` | Planner–worker supervisor above the pipelines ([decision #7](#7-supervisor--a-planner-above-the-pipelines-measured-before-it-was-turned-on)) |
+| `AGENT_SUPERVISOR_MAX_WORKERS` | `4` | Largest plan accepted; a bigger plan falls back to the classifier |
 
 ---
 
 ## Intent routing
 
-Every message is classified into one of these intents:
+Every message is classified into one of these intents. With the supervisor on ([decision #7](#7-supervisor--a-planner-above-the-pipelines-measured-before-it-was-turned-on)), a planner assigns these same pipelines as workers instead: one task runs exactly as below, two or more run together.
 
 | Intent | What happens | Example |
 |---|---|---|

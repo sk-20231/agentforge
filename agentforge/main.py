@@ -148,9 +148,9 @@ def _scan_output(text, trace_id: str = None):
 
     No-op when disabled or the text is empty. On redaction, logs the PII TYPES + count
     (never the values — that would re-leak the PII into the log) and returns the
-    redacted text. Applied to the NON-streaming string returns of run_agent and
-    resume_agent (a resumed turn is the same turn — issue #51); scanning
-    streamed output can't un-send tokens and is a documented follow-up.
+    redacted text. Applied to the string returns of run_agent and resume_agent (a
+    resumed turn is the same turn — issue #51); a streamed reply goes through
+    ``_scan_output_stream`` instead.
     """
     if not AGENT_OUTPUT_GUARDRAIL_ENABLED or not isinstance(text, str) or not text:
         return text
@@ -160,6 +160,52 @@ def _scan_output(text, trace_id: str = None):
                   {"types": result.types, "count": result.count}, trace_id=trace_id)
         return result.redacted_text
     return text
+
+
+def _scan_reply(result, trace_id: str = None):
+    """Apply the output guardrail to a pipeline result of either shape.
+
+    A string goes through ``_scan_output``; a streamed reply (any other non-None
+    value — the pipelines return a generator) through ``_scan_output_stream``.
+    ``None`` passes through unchanged.
+    """
+    if result is None or isinstance(result, str):
+        return _scan_output(result, trace_id)
+    return _scan_output_stream(result, trace_id)
+
+
+def _scan_output_stream(tokens, trace_id: str = None):
+    """Output guardrail for a STREAMED reply (issue #24): scan before showing.
+
+    Tokens on the screen cannot be taken back, so each chunk is redacted before it
+    is yielded — see ``output_guardrail.scan_stream``. Returns ``tokens`` unchanged
+    when the guardrail is disabled, so that setting keeps its old behaviour.
+    """
+    if not AGENT_OUTPUT_GUARDRAIL_ENABLED:
+        return tokens
+    return _redacted_stream(tokens, trace_id)
+
+
+def _redacted_stream(tokens, trace_id: str = None):
+    """Yield the redacted chunks of a streamed reply; log ONE event per reply.
+
+    The event carries the PII types + total count (never the values), like the
+    non-streaming path, plus ``streamed`` and the chunk count. It is written in
+    ``finally`` so a caller that stops reading early still leaves the record.
+    """
+    count, types, chunks = 0, [], 0
+    try:
+        for result in output_guardrail.scan_stream(tokens):
+            chunks += 1
+            if result.found:
+                count += result.count
+                types.extend(t for t in result.types if t not in types)
+            yield result.redacted_text
+    finally:
+        if count:
+            log_event("output_guardrail_redacted",
+                      {"types": types, "count": count, "streamed": True,
+                       "chunks": chunks}, trace_id=trace_id)
 
 
 def run_agent(
@@ -381,9 +427,9 @@ def _run_pipeline(intent: str, memory_candidate, route, user_id: str, user_input
         log_event("pipeline_start", {"pipeline": "docs_qa"}, trace_id=tid)
         result = answer_from_docs(user_input, history=safe_history, stream=stream,
                                   trace_id=tid, model=route.model)
-        # Output guardrail on the non-streaming return; a streamed Iterator passes
-        # through (post-hoc scanning of streamed tokens is a documented follow-up).
-        return _scan_output(result, tid) if isinstance(result, str) else result
+        # Output guardrail on both shapes: a string is scanned whole, a streamed
+        # Iterator chunk by chunk before each chunk is shown (issue #24).
+        return _scan_reply(result, tid)
 
     # -------------------------------
     # ANSWER / MEMORY-AWARE
@@ -392,7 +438,7 @@ def _run_pipeline(intent: str, memory_candidate, route, user_id: str, user_input
         log_event("pipeline_start", {"pipeline": "answer_with_memory"}, trace_id=tid)
         result = answer_with_memory(user_id, user_input, history=safe_history, stream=stream,
                                     trace_id=tid, model=route.model)
-        return _scan_output(result, tid) if isinstance(result, str) else result
+        return _scan_reply(result, tid)
 
     # -------------------------------
     # IGNORE

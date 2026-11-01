@@ -43,15 +43,16 @@ EGRESS POSTURE: the regex engine is pure stdlib ``re`` (zero egress). The Presid
 REDACT, don't refuse: the right UX for PII in an otherwise-useful answer is to mask the
     sensitive span (``[REDACTED_EMAIL]``), not to drop the whole reply.
 
-STREAMING LIMITATION (documented): on streaming paths the tokens are already sent, so
-    this can only run post-hoc. ``run_agent`` applies it to the NON-streaming string
-    returns; scanning streamed output (buffer-then-emit, or non-streaming the PII-risky
-    paths) is a ticketed follow-up — same shape as the citation guardrail's limitation.
+STREAMED REPLIES (issue #24): a token on the screen cannot be taken back, so a
+    streamed reply is scanned BEFORE each piece is shown, not after. ``scan_stream``
+    holds tokens back until a safe cut point (a sentence end), scans that chunk with
+    ``scan_output``, and yields the redacted chunk. The reply still appears
+    progressively, one sentence at a time, and no unscanned text reaches the caller.
 """
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import Iterable, Iterator, List, Tuple
 
 from agentforge.config import (
     AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE,
@@ -318,6 +319,81 @@ def scan_output(text: str, aggressive: bool = None,
         except Exception as exc:  # any scan-time failure -> never weaker than regex
             logger.warning("Output guardrail Presidio scan failed (%s); using regex.", exc)
     return _scan_regex(text, aggressive)
+
+
+# ---------------------------------------------------------------------------
+# Streamed replies — issue #24
+# ---------------------------------------------------------------------------
+
+# Hold back at most this many characters while waiting for a sentence end. Past it,
+# the chunk is cut at the last safe space instead, so a long run-on paragraph still
+# streams. Text with no safe cut at all (one very long token) keeps buffering.
+_STREAM_MAX_HOLD = 400
+
+# A sentence end: . ! ? followed by whitespace. No regex pattern matches across one —
+# none allows ". " inside a match — so this cut never splits a regex match. The
+# opt-in NER entities (PERSON / ADDRESS) are scanned one chunk at a time, so a cut
+# such as "Mr. | John Smith" gives the model less context than the whole reply.
+_SENTENCE_END = re.compile(r"[.!?]\s+")
+# Whitespace cuts (a line break, or the long-text fallback) can split a match: the
+# bearer pattern is "Bearer\s+<token>", and phone / Presidio number recognisers allow
+# spaces between digit groups. Such a cut is refused when the text before it ends in
+# a digit or in the word "Bearer".
+_LINE_BREAK = re.compile(r"\n+")
+_WHITESPACE = re.compile(r"\s+")
+_UNSAFE_BEFORE_SPACE = re.compile(r"(?:\d|\bBearer)$", re.IGNORECASE)
+
+
+def _unsafe_space(buffer: str, start: int) -> bool:
+    """True when a whitespace run starting at ``start`` may sit inside a PII match.
+
+    Looks only at the few characters before it ("Bearer" is 6), so a long buffer
+    is not re-scanned for every candidate cut.
+    """
+    return bool(_UNSAFE_BEFORE_SPACE.search(buffer[max(0, start - 8):start]))
+
+
+def _stream_cut(buffer: str) -> int:
+    """Return the index to cut ``buffer`` at (the chunk is ``buffer[:i]``), or 0.
+
+    Prefers the LAST safe cut, so each chunk is as long as possible. Order: a
+    sentence end or a line break; then, only past ``_STREAM_MAX_HOLD``, any space.
+    """
+    cut = 0
+    for m in _SENTENCE_END.finditer(buffer):
+        cut = max(cut, m.end())
+    for m in _LINE_BREAK.finditer(buffer):
+        if not _unsafe_space(buffer, m.start()):
+            cut = max(cut, m.end())
+    if cut == 0 and len(buffer) >= _STREAM_MAX_HOLD:
+        for m in _WHITESPACE.finditer(buffer):
+            if m.start() > 0 and not _unsafe_space(buffer, m.start()):
+                cut = max(cut, m.end())
+    return cut
+
+
+def scan_stream(tokens: Iterable[str], aggressive: bool = None,
+                engine: str = None) -> Iterator[OutputScanResult]:
+    """Scan a streamed reply chunk by chunk, before any of it is shown.
+
+    Tokens are held back until ``_stream_cut`` finds a safe cut point; that chunk is
+    scanned with ``scan_output`` and its result yielded. Whatever is left when the
+    stream ends is scanned and yielded last. Joining every ``redacted_text`` gives
+    the redacted reply; ``count`` / ``types`` are per chunk, so a caller that wants
+    totals adds them up. ``aggressive`` / ``engine`` pass straight to ``scan_output``.
+    Never logs the PII values. An empty or ``None`` token is skipped.
+    """
+    buffer = ""
+    for token in tokens:
+        if not token:
+            continue
+        buffer += token
+        cut = _stream_cut(buffer)
+        if cut:
+            chunk, buffer = buffer[:cut], buffer[cut:]
+            yield scan_output(chunk, aggressive=aggressive, engine=engine)
+    if buffer:
+        yield scan_output(buffer, aggressive=aggressive, engine=engine)
 
 
 # ---------------------------------------------------------------------------

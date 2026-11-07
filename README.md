@@ -289,6 +289,7 @@ agentforge/
 │   ├── safety.py                 # Sanitize, nonce spotlight wrap, SSRF URL guard
 │   ├── approval.py               # Human-in-the-loop contract: request, decision, handler
 │   ├── hitl_graph.py             # Shared LangGraph runtime: interrupt bridge, checkpointer, resume
+│   ├── sqlite_saver.py           # Optional SQLite checkpointer: paused turns survive a restart
 │   ├── guardrail.py              # Injection classifier for untrusted text (optional local model)
 │   ├── output_guardrail.py       # PII redaction on the final reply (regex / Presidio)
 │   ├── redteam.py                # Red-team harnesses: classifier, full-stack, PII
@@ -320,7 +321,7 @@ agentforge/
 ├── app.py                        # Streamlit UI entry point
 ├── requirements.txt              # Production dependencies
 ├── requirements-dev.txt          # Test dependencies
-├── pyproject.toml                # Package metadata + optional extras (guardrail, pii, redteam)
+├── pyproject.toml                # Package metadata + optional extras (guardrail, pii, redteam, durable)
 ├── .env.example                  # Environment variable template
 ├── SECURITY.md                   # How to report a vulnerability
 ├── LICENSE
@@ -353,9 +354,10 @@ cp .env.example .env                  # then add OPENAI_API_KEY
 pip install -e ".[guardrail]"   # prompt-injection classifier (torch + transformers, ~1–2 GB)
 pip install -e ".[pii]"         # Presidio + GLiNER engine for the output PII guardrail
 pip install -e ".[redteam]"     # red-team harness extras (needs [guardrail] too)
+pip install -e ".[durable]"     # SQLite checkpointer: paused approvals survive a restart
 ```
 
-Without `[guardrail]` the injection classifier does nothing (fail-open). Without `[pii]` the output guardrail uses its built-in regex engine. The third-party `fetch` tool is started with `uvx`, so it needs [uv](https://docs.astral.sh/uv/) installed; without it, the agent runs without that one tool.
+Without `[guardrail]` the injection classifier does nothing (fail-open). Without `[pii]` the output guardrail uses its built-in regex engine. Without `[durable]` paused turns are kept in memory, and setting `AGENT_CHECKPOINTER=sqlite` stops the app at startup with an install hint. The third-party `fetch` tool is started with `uvx`, so it needs [uv](https://docs.astral.sh/uv/) installed; without it, the agent runs without that one tool.
 
 ## Usage
 
@@ -413,6 +415,9 @@ The main settings. All are read from environment variables (with defaults) in [`
 | `AGENT_ROUTING_HARD_INTENTS` | `REACT` | Intents sent to the frontier tier |
 | `AGENT_SUPERVISOR_ENABLED` | `false` | Planner–worker supervisor above the pipelines ([decision #7](#7-supervisor--a-planner-above-the-pipelines-measured-before-it-was-turned-on)) |
 | `AGENT_SUPERVISOR_MAX_WORKERS` | `4` | Largest plan accepted; a bigger plan falls back to the classifier |
+| `AGENT_CHECKPOINTER` | `memory` | Where paused turns are saved: `memory`, or `sqlite` so an approval survives a restart (needs `[durable]`) |
+| `AGENT_CHECKPOINT_DB` | `checkpoints.sqlite` | The SQLite file for `AGENT_CHECKPOINTER=sqlite`; holds turn state, so keep it private |
+| `AGENT_APPROVAL_TTL_SECONDS` | `0` | Refuse and delete an approval older than this; `0` = never expire |
 
 ---
 

@@ -30,6 +30,7 @@ agent_logs.jsonl
 corpus.json
 memory.json
 tool_pins.json
+checkpoints.sqlite*
 /memory/
 
 # Red-team eval outputs (agentforge.redteam / redteam_fullstack / redteam_pii) —

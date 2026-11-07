@@ -10,7 +10,15 @@ import os
 import streamlit as st
 
 from agentforge.approval import APPROVE_TURN, ApprovalRequest, ApprovalRequired
-from agentforge.main import discard_approval, pending_approval, resume_agent, run_agent
+from agentforge.hitl_graph import ApprovalExpired, is_durable
+from agentforge.main import (
+    discard_approval,
+    pending_approval,
+    pending_approvals,
+    resume_agent,
+    run_agent,
+    sweep_stale_runs,
+)
 from agentforge.rag.document_store import ingest_file, load_corpus
 from agentforge.logger import (
     compute_cost_summary,
@@ -74,6 +82,38 @@ if "pending_thread_id" not in st.session_state:
     st.session_state.pending_thread_id = None  # handle of the paused turn
 if "resume_decision" not in st.session_state:
     st.session_state.resume_decision = None   # True/False once a button is clicked
+
+
+# ── Durable runs (Step 31): clean up, then restore a card after a restart ──
+# Once per server process (cache_resource), before this process runs a turn:
+# keep turns paused at an approval, delete expired ones and turns a crash
+# stopped mid-node. Those are not re-driven — nobody is waiting for them.
+@st.cache_resource
+def _sweep_saved_turns_once() -> dict:
+    return sweep_stale_runs()
+
+
+_sweep_saved_turns_once()
+
+# The paused turn's ID lives only in this browser session. With
+# AGENT_CHECKPOINTER=sqlite the turn itself survives a restart, so a new
+# session looks it up by user ID. Durable mode only: with the in-memory saver
+# a restart loses the turn anyway, and a lookup would move one session's card
+# into another session of the same user — a change from the old behaviour.
+if "_restore_checked" not in st.session_state:
+    st.session_state._restore_checked = True
+    if is_durable() and st.session_state.pending_thread_id is None:
+        restored = pending_approvals(st.session_state.user_id)
+        if restored:
+            newest = restored[0]
+            question = (newest.values.get("user_input")
+                        or "(a question asked before the restart)")
+            st.session_state.pending_thread_id = newest.thread_id
+            st.session_state.pending_input = question
+            st.session_state.pending_tid = newest.trace_id
+            st.session_state.messages.append({"role": "user", "content": question})
+            logger.info("Restored pending approval %s (%d paused for this user)",
+                        newest.thread_id, len(restored))
 
 # ── Sidebar — settings, ingestion, corpus ─────────────────────────────
 with st.sidebar:
@@ -146,6 +186,12 @@ req = None
 if st.session_state.pending_thread_id is not None and st.session_state.resume_decision is None:
     try:
         req = pending_approval(st.session_state.pending_thread_id).request
+    except ApprovalExpired:
+        # Waited longer than AGENT_APPROVAL_TTL_SECONDS; already deleted and logged.
+        logger.info("Pending approval %s expired; clearing it",
+                    st.session_state.pending_thread_id)
+        _clear_pending_turn()
+        st.info("That approval expired. Please ask your question again.")
     except ValueError:
         # Already settled, discarded, or lost (the in-memory checkpointer does
         # not survive an app restart). Say so instead of rendering a card that

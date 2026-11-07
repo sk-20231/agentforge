@@ -15,7 +15,7 @@ Streaming behaviour (Step 4):
 import json
 
 from agentforge.approval import APPROVE_TURN, ApprovalRequest
-from agentforge.main import run_agent
+from agentforge.main import run_agent, sweep_stale_runs
 from agentforge.logger import log_event
 from agentforge.tools import prime_tool_catalog
 
@@ -51,6 +51,9 @@ if __name__ == "__main__":
     # Discover the MCP tool catalog once at startup (Step 17c.1) so the intent
     # classifier knows the available tools and the cost is paid up front.
     prime_tool_catalog()
+    # Step 31: clean up turns a previous run left saved (crash mid-turn, or an
+    # expired approval). Only matters with AGENT_CHECKPOINTER=sqlite.
+    sweep_stale_runs()
     user_id = input("Enter user id: ").strip()
     session_id = "default"
     history: list[dict] = []

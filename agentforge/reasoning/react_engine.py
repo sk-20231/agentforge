@@ -129,6 +129,7 @@ class _ReactState(TypedDict):
     """Checkpointed turn state. Plain data only — the checkpointer serializes
     it. Live objects (the gateway) travel in ``_ReactContext`` instead."""
     user_id: str
+    user_input: str           # the question, for a card shown after a restart (Step 31)
     messages: list
     step: int                 # think steps taken so far
     max_steps: int
@@ -232,7 +233,7 @@ def build_react_input(user_id: str, user_input: str, gw, max_steps: int = 5,
     log_event("react_tools_discovered", {"tools": [t["name"] for t in gw.catalog]},
               trace_id=trace_id)
     return {
-        "user_id": user_id, "messages": messages, "step": 0,
+        "user_id": user_id, "user_input": user_input, "messages": messages, "step": 0,
         "max_steps": max_steps, "model": model, "trace_id": trace_id,
         "tool_pending": False, "tool_name": None, "tool_input": None,
         "raw": None, "granted": [], "reply": None,

@@ -27,6 +27,10 @@ AGENT_CORPUS_FILE = os.environ.get("AGENT_CORPUS_FILE", "corpus.json")
 # on later turns to detect rug pulls (a tool's definition silently changing after
 # we trusted it). Runtime data — gitignored. (Step 17e gap C.)
 AGENT_TOOL_PINS_FILE = os.environ.get("AGENT_TOOL_PINS_FILE", "tool_pins.json")
+# SQLite file for saved turns when AGENT_CHECKPOINTER=sqlite (Step 31). It holds
+# the full turn state — the user's messages and tool output — so it is runtime
+# data like the files above: gitignored, never committed.
+AGENT_CHECKPOINT_DB = os.environ.get("AGENT_CHECKPOINT_DB", "checkpoints.sqlite")
 
 # Maximum estimated tokens allowed in conversation history before trimming.
 # Conservative default leaves room for system prompts + RAG chunks (which can
@@ -197,6 +201,18 @@ AGENT_SUPERVISOR_ENABLED = _env_flag("AGENT_SUPERVISOR_ENABLED", False)
 # Most tasks one plan may hold. A plan with more is treated as invalid and the
 # turn falls back to the classifier path, rather than silently dropping parts.
 AGENT_SUPERVISOR_MAX_WORKERS = int(os.environ.get("AGENT_SUPERVISOR_MAX_WORKERS", "4"))
+
+# --- DURABLE RUNS (Step 31) --------------------------------------------------
+# Where paused turns are saved. "memory" (the default) keeps them in the
+# process, so a restart loses every turn waiting for approval — the behaviour
+# before Step 31. "sqlite" saves them to AGENT_CHECKPOINT_DB, so an approval
+# card survives a restart; it needs the [durable] extra and fails at startup
+# without it (a silent fallback to memory would drop the durability asked for).
+AGENT_CHECKPOINTER = os.environ.get("AGENT_CHECKPOINTER", "memory").strip().lower()
+# Seconds a paused turn may wait for approval. Older approvals are refused and
+# deleted, so nobody approves a call whose context has gone stale. 0 = never
+# expire (the behaviour before Step 31).
+AGENT_APPROVAL_TTL_SECONDS = int(os.environ.get("AGENT_APPROVAL_TTL_SECONDS", "0"))
 
 
 # MCP servers the agent connects to at runtime to discover and call tools.

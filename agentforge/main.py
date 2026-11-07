@@ -468,8 +468,35 @@ def pending_approval(thread_id: str) -> hitl_graph.PendingApproval:
 
 def discard_approval(thread_id: str, reason: str = "abandoned") -> None:
     """Drop a paused turn the user abandoned (e.g. "Clear chat" while a card
-    is pending), so it does not stay in memory until the app restarts."""
+    is pending), so it does not stay saved until it expires."""
     hitl_graph.discard(thread_id, reason)
+
+
+def pending_approvals(user_id: str) -> list:
+    """Every turn of ``user_id`` that is paused at an approval, newest first
+    (Step 31). The front-end keeps a paused turn's ID only in its own session,
+    so after a restart this is how it finds the card again. An expired
+    approval is deleted while listing and left out."""
+    found = []
+    for thread_id in hitl_graph.thread_ids():
+        if not hitl_graph.is_paused(thread_id):
+            continue
+        try:
+            pending = pending_approval(thread_id)
+        except ValueError:  # expired (deleted and logged), or an unknown pipeline
+            continue
+        if pending.user_id == user_id:
+            found.append(pending)
+    found.sort(key=lambda p: p.paused_at.timestamp() if p.paused_at else 0.0, reverse=True)
+    log_event("pending_approvals_listed", {"count": len(found)})
+    return found
+
+
+def sweep_stale_runs() -> dict:
+    """Startup clean-up of saved turns (Step 31): keep paused ones, delete
+    expired approvals and turns a crash stopped mid-node. Call once per
+    process, before any turn runs. See ``hitl_graph.sweep``."""
+    return hitl_graph.sweep()
 
 
 def resume_agent(thread_id: str, decision, approval_handler=None) -> str:

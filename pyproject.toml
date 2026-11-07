@@ -60,6 +60,18 @@ pii = [
     "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
 ]
 
+# Durable runs (Step 31). OPTIONAL: saves paused turns to a local SQLite file so an
+# approval survives a restart (AGENT_CHECKPOINTER=sqlite). Without it the in-memory
+# checkpointer is used, as before. Install with:  pip install -e ".[durable]"
+#
+# Egress note: a local file only — no network code, no telemetry (source checked).
+# Pinned to 3.1.1 on purpose: 3.1.2+ requires langgraph-checkpoint 4.3, and this
+# repo is tested on 4.2. It also pulls sqlite-vec (a native binary) that only the
+# unused SqliteStore loads; the checkpointer never imports it. Raise on purpose.
+durable = [
+    "langgraph-checkpoint-sqlite==3.1.1",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["agentforge*"]

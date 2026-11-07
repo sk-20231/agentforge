@@ -189,6 +189,7 @@ class _ActState(TypedDict):
     """Checkpointed turn state. Plain data only — the checkpointer serializes
     it. Live objects (the gateway) travel in ``_ActContext`` instead."""
     user_id: str
+    user_input: str           # the question, for a card shown after a restart (Step 31)
     messages: list
     model: Optional[str]      # routed model (Step 28) — survives a resume
     trace_id: Optional[str]   # issue #7 — the resumed half logs on the same trace
@@ -355,7 +356,8 @@ async def _run_act(graph_input, thread_id: str, gw,
 
 
 async def _run_tool_loop(messages: list, trace_id: str = None, approval_handler=None,
-                         user_id: str = "", model: str = None) -> str:
+                         user_id: str = "", model: str = None,
+                         user_input: str = "") -> str:
     """Open the shared MCP gateway, then run the ACT graph.
 
     ACT is MCP-only (Step 17c.1): every tool is discovered from the gateway; there
@@ -374,8 +376,8 @@ async def _run_tool_loop(messages: list, trace_id: str = None, approval_handler=
                if approval_handler is not None else None)
     async with mcp_gateway(trace_id, approval_handler=handler) as gw:
         initial = {
-            "user_id": user_id, "messages": messages, "model": model,
-            "trace_id": trace_id, "tool_calls": [], "index": 0,
+            "user_id": user_id, "user_input": user_input, "messages": messages,
+            "model": model, "trace_id": trace_id, "tool_calls": [], "index": 0,
             "tool_messages": [], "granted": [], "output": None,
         }
         return await _run_act(initial, new_thread_id("act"), gw, trace_id)
@@ -420,7 +422,8 @@ def run_llm_with_tools(user_id: str, user_input: str, trace_id: str = None,
     log_event("act_start", {"history_messages": len(history or [])}, trace_id=trace_id)
     return run_interruptible(_run_tool_loop(messages, trace_id,
                                             approval_handler=approval_handler,
-                                            user_id=user_id, model=model))
+                                            user_id=user_id, model=model,
+                                            user_input=user_input))
 
 
 def resume_tool_loop(thread_id: str, decision,

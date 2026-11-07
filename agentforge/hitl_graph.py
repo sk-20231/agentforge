@@ -7,15 +7,19 @@ node can pause for human approval. What they share lives here, once:
 - ``GraphApprovalHandler`` bridges the front-end's approval contract onto
   LangGraph ``interrupt()``.
 - ``CHECKPOINTER`` saves each turn's state between nodes, keyed by a
-  per-turn ``thread_id``.
+  per-turn ``thread_id``. In memory by default; ``AGENT_CHECKPOINTER=sqlite``
+  saves it to a file so paused turns survive a restart (Step 31).
 - ``new_thread_id`` / ``pipeline_of`` — a thread ID names its pipeline
   (``react-…`` / ``act-…``), so the ID alone is enough to resume a turn.
 - ``run_graph`` invokes or resumes a graph, turns a pause into
   ApprovalRequired (carrying the thread ID) for the front-end, and deletes a
   finished turn's thread.
 - ``pending_approval`` / ``apending_approval`` read a paused turn back as a
-  ``PendingApproval``, and refuse one that is no longer pending.
+  ``PendingApproval``, and refuse one that is no longer pending or whose
+  approval expired (``AGENT_APPROVAL_TTL_SECONDS``).
 - ``discard`` deletes a paused turn the user abandoned.
+- ``thread_ids`` / ``is_paused`` / ``sweep`` find saved turns after a restart:
+  paused ones are kept, the rest (a crash mid-node) are deleted, not re-driven.
 
 The rule both graphs are built around: LangGraph saves state only BETWEEN
 nodes, and on resume re-runs the paused node from its first line. So the
@@ -24,18 +28,57 @@ can pause makes at most ONE gated call per run, reading it from saved state.
 """
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import interrupt
 
 from agentforge.approval import ApprovalRequest, ApprovalRequired
+from agentforge.config import (
+    AGENT_APPROVAL_TTL_SECONDS,
+    AGENT_CHECKPOINT_DB,
+    AGENT_CHECKPOINTER,
+)
 from agentforge.logger import log_event
 
-# One in-process checkpointer for both graphs. Thread IDs are random per turn,
-# so turns never share state. A persistent checkpointer (SQLite / Postgres)
-# drops in here when multi-user needs state to outlive the process.
-CHECKPOINTER = InMemorySaver()
+# The channel LangGraph saves a pause under: a pending write on the turn's
+# top-level checkpoint — also when the pause happened inside a nested graph
+# (the supervisor's REACT worker), so no graph is needed to find one.
+_INTERRUPT_CHANNEL = "__interrupt__"
+
+
+def build_checkpointer(kind: str = "memory", path: str = "checkpoints.sqlite"):
+    """The checkpointer for ``kind``: ``memory`` (in the process) or
+    ``sqlite`` (saved to ``path``, survives a restart — Step 31). Raises
+    RuntimeError when sqlite is asked for without the ``[durable]`` extra, and
+    ValueError for an unknown kind."""
+    if kind == "memory":
+        return InMemorySaver()
+    if kind == "sqlite":
+        try:
+            from agentforge.sqlite_saver import ThreadedSqliteSaver
+        except ImportError as exc:
+            raise RuntimeError("AGENT_CHECKPOINTER=sqlite needs the [durable] extra: "
+                               'pip install -e ".[durable]"') from exc
+        return ThreadedSqliteSaver.open(path)
+    raise ValueError(f"Unknown AGENT_CHECKPOINTER {kind!r}; use 'memory' or 'sqlite'")
+
+
+# One checkpointer for every graph. Thread IDs are random per turn, so turns
+# never share state.
+CHECKPOINTER = build_checkpointer(AGENT_CHECKPOINTER, AGENT_CHECKPOINT_DB)
+
+
+class ApprovalExpired(ValueError):
+    """A paused turn waited longer than ``AGENT_APPROVAL_TTL_SECONDS``. A
+    ValueError, so callers that treat "no longer pending" as ValueError keep
+    working unchanged."""
+
+
+def is_durable() -> bool:
+    """True when paused turns are saved outside the process (survive a restart)."""
+    return not isinstance(CHECKPOINTER, InMemorySaver)
 
 
 def new_thread_id(pipeline: str) -> str:
@@ -62,6 +105,7 @@ class PendingApproval:
     user_id: str
     trace_id: Optional[str]
     values: dict
+    paused_at: Optional[datetime] = None   # last saved checkpoint (Step 31)
 
 
 class GraphApprovalHandler:
@@ -99,6 +143,63 @@ def _config(thread_id: str, recursion_limit: int) -> dict:
             "recursion_limit": recursion_limit}
 
 
+def _thread_config(thread_id: str) -> dict:
+    return {"configurable": {"thread_id": thread_id}}
+
+
+def _saved_trace_id(saved) -> Optional[str]:
+    """The turn's trace ID from a raw checkpoint tuple (None if gone)."""
+    if saved is None:
+        return None
+    return saved.checkpoint.get("channel_values", {}).get("trace_id")
+
+
+def _is_paused(saved) -> bool:
+    return saved is not None and any(
+        write[1] == _INTERRUPT_CHANNEL for write in (saved.pending_writes or []))
+
+
+def thread_ids() -> list:
+    """Every turn the checkpointer holds: paused ones, and any a crash left."""
+    if hasattr(CHECKPOINTER, "thread_ids"):
+        return CHECKPOINTER.thread_ids()
+    # InMemorySaver keys storage by thread ID. It is a defaultdict, so a read
+    # of a deleted thread leaves an empty entry behind — skip those.
+    return [tid for tid, by_ns in CHECKPOINTER.storage.items() if any(by_ns.values())]
+
+
+def is_paused(thread_id: str) -> bool:
+    """Whether the turn is waiting at an approval. Reads the raw checkpoint,
+    so it needs no graph — the startup sweep runs before any graph is built."""
+    return _is_paused(CHECKPOINTER.get_tuple(_thread_config(thread_id)))
+
+
+def last_activity(thread_id: str) -> Optional[datetime]:
+    """When the turn last saved a checkpoint, in any namespace — a nested
+    graph (the supervisor's REACT worker) saves its own, later than its
+    parent's. The approval TTL counts from here. None if the turn is gone."""
+    stamps = [saved.checkpoint["ts"] for saved in CHECKPOINTER.list(_thread_config(thread_id))]
+    return max(datetime.fromisoformat(ts) for ts in stamps) if stamps else None
+
+
+def _age_seconds(paused_at: datetime, now: Optional[datetime] = None) -> float:
+    return ((now or datetime.now(timezone.utc)) - paused_at).total_seconds()
+
+
+def _expired(paused_at: Optional[datetime], now: Optional[datetime] = None) -> bool:
+    return (AGENT_APPROVAL_TTL_SECONDS > 0 and paused_at is not None
+            and _age_seconds(paused_at, now) > AGENT_APPROVAL_TTL_SECONDS)
+
+
+def _expire(thread_id: str, paused_at: datetime, trace_id: Optional[str],
+            now: Optional[datetime] = None) -> None:
+    CHECKPOINTER.delete_thread(thread_id)
+    log_event("approval_expired",
+              {"thread_id": thread_id, "age_seconds": round(_age_seconds(paused_at, now)),
+               "ttl_seconds": AGENT_APPROVAL_TTL_SECONDS},
+              trace_id=trace_id)
+
+
 def _pending_from_snapshot(snapshot, thread_id: str, pipeline: str) -> PendingApproval:
     # Ask the precise question — "is an interrupt waiting?" — not "is a node
     # scheduled next?". A second interrupt() inside one node run leaves
@@ -111,12 +212,18 @@ def _pending_from_snapshot(snapshot, thread_id: str, pipeline: str) -> PendingAp
         raise ValueError("This approval is no longer pending and cannot be resumed.")
     payload = waiting[0].value
     values = dict(snapshot.values)
+    paused_at = last_activity(thread_id)
+    if _expired(paused_at):
+        # Checked on every read, so an approval that expires while its card is
+        # on screen is refused at the click, not only at the next restart.
+        _expire(thread_id, paused_at, values.get("trace_id"))
+        raise ApprovalExpired("This approval has expired and cannot be resumed.")
     return PendingApproval(
         thread_id=thread_id, pipeline=pipeline,
         request=ApprovalRequest(tool=payload["tool"], server=payload["server"],
                                 arguments=payload["arguments"]),
         user_id=values.get("user_id", ""), trace_id=values.get("trace_id"),
-        values=values)
+        values=values, paused_at=paused_at)
 
 
 def pending_approval(graph, thread_id: str, pipeline: str) -> PendingApproval:
@@ -136,16 +243,44 @@ async def apending_approval(graph, thread_id: str, pipeline: str) -> PendingAppr
 
 def discard(thread_id: str, reason: str) -> None:
     """Delete a paused turn the user abandoned (e.g. "Clear chat" while a
-    card is pending), so it does not stay in memory until the app restarts.
+    card is pending), so it does not stay saved (in memory, or on disk with
+    AGENT_CHECKPOINTER=sqlite) until it expires.
     Safe to call for a thread that no longer exists. The event is logged on
     the turn's own trace (read from its saved state before deletion), so it
     is not orphaned from the turn it ends (issue #7)."""
-    saved = CHECKPOINTER.get_tuple({"configurable": {"thread_id": thread_id}})
-    trace_id = (saved.checkpoint.get("channel_values", {}).get("trace_id")
-                if saved is not None else None)
+    trace_id = _saved_trace_id(CHECKPOINTER.get_tuple(_thread_config(thread_id)))
     CHECKPOINTER.delete_thread(thread_id)
     log_event("approval_discarded", {"thread_id": thread_id, "reason": reason},
               trace_id=trace_id)
+
+
+def sweep(now: Optional[datetime] = None) -> dict:
+    """Clean up the saved turns a restart finds (Step 31). Call once at
+    startup, before any turn runs, and only with one process per database.
+
+    A turn paused at an approval is kept, unless its approval expired. Any
+    other saved turn stopped in the middle of a node: the process died during
+    it (a finished or failed turn deletes its own thread in ``run_graph``). It
+    is deleted, NOT re-driven: the browser or terminal that asked is gone, so
+    finishing it would spend tokens — and maybe call tools — for nobody.
+    """
+    counts = {"kept": 0, "expired": 0, "abandoned": 0}
+    for thread_id in thread_ids():
+        saved = CHECKPOINTER.get_tuple(_thread_config(thread_id))
+        trace_id = _saved_trace_id(saved)
+        if _is_paused(saved):
+            paused_at = last_activity(thread_id)
+            if _expired(paused_at, now):
+                _expire(thread_id, paused_at, trace_id, now)
+                counts["expired"] += 1
+            else:
+                counts["kept"] += 1
+            continue
+        CHECKPOINTER.delete_thread(thread_id)
+        log_event("run_abandoned", {"thread_id": thread_id}, trace_id=trace_id)
+        counts["abandoned"] += 1
+    log_event("checkpoint_sweep", {**counts, "durable": is_durable()})
+    return counts
 
 
 async def run_graph(graph, graph_input, *, thread_id: str, recursion_limit: int,
@@ -156,15 +291,18 @@ async def run_graph(graph, graph_input, *, thread_id: str, recursion_limit: int,
 
     A paused graph surfaces as ApprovalRequired carrying ``thread_id`` — the
     only handle a resume needs; the turn state lives in the checkpointer. A
-    finished turn's
-    thread is deleted, so the in-memory checkpointer does not grow with every
-    turn. ``progress_key`` names the state field logged at a pause (REACT's
-    step counter, ACT's tool-call index).
+    finished turn's thread is deleted, so the checkpointer does not grow with
+    every turn. ``progress_key`` names the state field logged at a pause
+    (REACT's step counter, ACT's tool-call index).
+
+    ``durability="sync"`` (Step 31): each checkpoint is written before the next
+    node starts, so a crash cannot lose the last completed step. Nested graphs
+    (the supervisor's REACT worker) inherit it through the config.
     """
     paused = False
     try:
         result = await graph.ainvoke(graph_input, _config(thread_id, recursion_limit),
-                                     context=context)
+                                     context=context, durability="sync")
         pending = result.get("__interrupt__")
         if pending:
             paused = True

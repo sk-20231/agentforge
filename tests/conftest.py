@@ -5,6 +5,13 @@ Use a temporary directory for memory so tests don't touch real user data.
 import os
 import pytest
 
+# Step 31: the checkpointer is built when agentforge.hitl_graph is imported, from
+# AGENT_CHECKPOINTER. Force the in-memory one BEFORE any agentforge import, so a
+# developer's .env with AGENT_CHECKPOINTER=sqlite never makes the suite write
+# turns into their real checkpoints.sqlite (load_dotenv does not override a set
+# variable). Tests of the SQLite saver build their own, under tmp_path.
+os.environ["AGENT_CHECKPOINTER"] = "memory"
+
 
 @pytest.fixture(autouse=True)
 def _redirect_runtime_paths(tmp_path, monkeypatch):
@@ -34,6 +41,9 @@ def _redirect_runtime_paths(tmp_path, monkeypatch):
     monkeypatch.setattr("agentforge.memory.semantic.MEMORY_DIR", str(memory_dir))
     monkeypatch.setattr("agentforge.mcp_client.AGENT_TOOL_PINS_FILE", str(tmp_path / "tool_pins.json"))
     monkeypatch.setattr("agentforge.rag.document_store.AGENT_CORPUS_FILE", str(tmp_path / "corpus.json"))
+    # Not a path, but read from the same .env: an approval TTL there would make
+    # paused-turn tests depend on how long they take. Tests that need one set it.
+    monkeypatch.setattr("agentforge.hitl_graph.AGENT_APPROVAL_TTL_SECONDS", 0)
 
 
 @pytest.fixture(autouse=True)

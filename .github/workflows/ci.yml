@@ -82,7 +82,9 @@ jobs:
           # `python mcp_servers/x_server.py`; a subprocess's sys.path starts at the
           # script dir, not the repo root, so pytest's rootdir trick doesn't reach
           # them. (run.py / app.py require this install as well.)
-          pip install -e .
+          # [durable] (Step 31) is small and pure-Python apart from one unused
+          # binary; installed so its tests run in CI instead of skipping.
+          pip install -e ".[durable]"
 
       # -----------------------------------------------------------------------
       # 4. Run the full test suite

@@ -537,7 +537,8 @@ def resume_agent(thread_id: str, decision, approval_handler=None,
         log_event(f"{pending.pipeline}_resume_rejected",
                   {"thread_id": thread_id, "reason": "stale card"},
                   trace_id=pending.trace_id)
-        raise ValueError("This approval is no longer pending and cannot be resumed.")
+        raise hitl_graph.ApprovalNotPending(
+            "This approval is no longer pending and cannot be resumed.")
     # Step 31: hold the claim for the whole resume, so a second resume of
     # the same approval (two tabs, one card) is refused and cannot run the
     # tool again. Released when the resume ends, success or failure.

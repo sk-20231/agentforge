@@ -78,10 +78,16 @@ def build_checkpointer(kind: str = "memory", path: str = "checkpoints.sqlite"):
 CHECKPOINTER = build_checkpointer(AGENT_CHECKPOINTER, AGENT_CHECKPOINT_DB)
 
 
-class ApprovalExpired(ValueError):
-    """A paused turn waited longer than ``AGENT_APPROVAL_TTL_SECONDS``. A
-    ValueError, so callers that treat "no longer pending" as ValueError keep
-    working unchanged."""
+class ApprovalNotPending(ValueError):
+    """An approval that cannot be resumed: already settled, discarded, being
+    resumed elsewhere (another tab), or answered on a card that is no longer
+    the current pause. Nothing was run. A ValueError, so callers that treat
+    "no longer pending" as ValueError keep working unchanged; a front-end can
+    catch this one to tell the user plainly instead of reporting a failure."""
+
+
+class ApprovalExpired(ApprovalNotPending):
+    """A paused turn waited longer than ``AGENT_APPROVAL_TTL_SECONDS``."""
 
 
 def is_durable() -> bool:
@@ -252,7 +258,7 @@ def _pending_from_snapshot(snapshot, thread_id: str, pipeline: str) -> PendingAp
         log_event(f"{pipeline}_resume_rejected",
                   {"thread_id": thread_id, "reason": "no pending interrupt"},
                   trace_id=snapshot.values.get("trace_id"))
-        raise ValueError("This approval is no longer pending and cannot be resumed.")
+        raise ApprovalNotPending("This approval is no longer pending and cannot be resumed.")
     payload = waiting[0].value
     interrupt_id = waiting[0].id
     values = dict(snapshot.values)
@@ -352,7 +358,8 @@ def claimed(pending: PendingApproval):
         log_event(f"{pending.pipeline}_resume_rejected",
                   {"thread_id": pending.thread_id, "reason": "already being resumed"},
                   trace_id=pending.trace_id)
-        raise ValueError("This approval is already being resumed.")
+        raise ApprovalNotPending("This approval is already being resumed, for example "
+                                 "in another tab. It was not run again.")
     try:
         yield
     finally:

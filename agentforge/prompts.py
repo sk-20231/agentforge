@@ -112,6 +112,21 @@ When a tool returns an error or nothing useful, do these steps in order:
 Never end with "I cannot access the information" before step 1 is done.
 """
 
+# Issue #86: the observation for a Deny of a call that ALREADY RAN before a
+# crash (Step 31 journal). The result is withheld, but the action happened, so
+# the model must not say "not made" — and must not answer as if it had the
+# result. Live, a softer "Note: … already ran" wording made gpt-4o-mini
+# summarise the page from memory and never mention the tool (3 of 3 runs);
+# starting with "Error:" (like the plain Deny) and giving the reply's content
+# explicitly is the fix. ``{tool}`` is the tool name.
+ALREADY_RAN_DECLINED = (
+    "Error: the user declined to use the result of tool '{tool}'. The call had "
+    "already run before the app restarted, so whatever it does has already "
+    "happened, but its result is withheld and you do not have it. Do not "
+    "describe, summarise or guess what it returned. In your reply, tell the user "
+    "that this tool already ran and that its result was not used."
+)
+
 # Issue #8 (query-focused observation compression): an oversized tool
 # observation is distilled relative to THE USER'S QUESTION before it enters
 # the message history. The input is untrusted data, so the compressor gets the

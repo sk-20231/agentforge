@@ -117,6 +117,10 @@ class TestGatewayJournal:
         out, _ = _call(session, slot, handler=lambda r: False, capture=capture)
         assert "already ran" in out and "SAVED" not in out
         assert "was not made" not in out            # that would be false
+        # Issue #86: a soft "Note:" made the model answer from memory and never
+        # mention the tool. It must read as a refusal and say what to tell the user.
+        assert out.startswith("Error:")
+        assert "Do not describe" in out and "tell the user" in out
         denied = [p for e, p, kw in capture if e == "mcp_audit" and p["outcome"] == "denied"]
         assert denied[0]["reason"] == "user declined; call already ran"
         session.call_tool.assert_not_called()
@@ -328,6 +332,23 @@ class TestActAfterCrash:
         tool_msg = [m for m in followup_messages if m.get("role") == "tool"][0]
         assert "already ran" in tool_msg["content"]
         assert "PAGE FROM BEFORE THE CRASH" not in tool_msg["content"]
+
+    def test_refusals_are_approval_not_pending(self):
+        # The app shows these plainly instead of "Something went wrong" (#86).
+        with contextlib.ExitStack() as stack:
+            session, (tools_pkg, _, thread_id) = self._setup(stack)
+            pending = main.pending_approval(thread_id)
+            with pytest.raises(hitl_graph.ApprovalNotPending):          # stale card
+                main.resume_agent(thread_id, True, interrupt_id="an-older-pause")
+            assert hitl_graph.journal().claim(thread_id, pending.interrupt_id)
+            with pytest.raises(hitl_graph.ApprovalNotPending):          # another tab
+                main.resume_agent(thread_id, True, approval_handler=_raising_handler)
+            hitl_graph.discard(thread_id, "test")
+            with pytest.raises(hitl_graph.ApprovalNotPending):          # settled
+                main.resume_agent(thread_id, True, approval_handler=_raising_handler)
+        assert issubclass(hitl_graph.ApprovalExpired, hitl_graph.ApprovalNotPending)
+        assert issubclass(hitl_graph.ApprovalNotPending, ValueError)
+        session.call_tool.assert_not_called()
 
     def test_a_held_claim_refuses_a_second_resume(self):
         # Two tabs, one card: while one resume holds the claim, the other is

@@ -59,6 +59,7 @@ from agentforge.config import (
     MCP_SERVERS,
 )
 from agentforge.logger import log_event
+from agentforge.prompts import ALREADY_RAN_DECLINED
 from agentforge.safety import (
     fingerprint_tool,
     is_safe_url,
@@ -399,12 +400,11 @@ class MCPGateway:
                         # The call ran before a crash; a Deny cannot undo it.
                         # Telling the model "the call was not made" would be
                         # false, and it could repeat that to the user. So say
-                        # what happened, and withhold the result as asked.
+                        # what happened, withhold the result as asked, and tell
+                        # the model what its reply must say (issue #86).
                         self._audit(tool_name, server, trusted, arg_keys, "denied",
                                     reason="user declined; call already ran")
-                        return (f"Note: tool '{tool_name}' already ran before the app "
-                                f"restarted, so its effects have happened. The user "
-                                f"chose not to use its result, which is withheld.")
+                        return ALREADY_RAN_DECLINED.format(tool=tool_name)
                     self._audit(tool_name, server, trusted, arg_keys, "denied",
                                 reason="user declined")
                     return (f"Error: the user declined permission for tool "

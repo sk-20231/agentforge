@@ -10,7 +10,7 @@ import os
 import streamlit as st
 
 from agentforge.approval import APPROVE_TURN, ApprovalRequest, ApprovalRequired
-from agentforge.hitl_graph import ApprovalExpired, is_durable
+from agentforge.hitl_graph import ApprovalExpired, ApprovalNotPending, is_durable
 from agentforge.main import (
     discard_approval,
     pending_approval,
@@ -313,6 +313,13 @@ if st.session_state.pending_input is not None and (
                 interrupted = True
                 st.session_state.pending_thread_id = exc.thread_id
                 st.session_state.resume_decision = None
+        except ApprovalNotPending as e:
+            # Refused before anything ran: another tab is resuming it, it
+            # expired, or it was already settled. Not a failure, so do not
+            # say "Something went wrong".
+            logger.info("Resume refused: %s", e)
+            result = str(e)
+            st.info(result)
         except Exception as e:
             logger.error("run_agent failed: %s", e, exc_info=True)
             result = f"Something went wrong: {e}"

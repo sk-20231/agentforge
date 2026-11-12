@@ -65,11 +65,15 @@ pii = [
 # checkpointer is used, as before. Install with:  pip install -e ".[durable]"
 #
 # Egress note: a local file only — no network code, no telemetry (source checked).
-# Pinned to 3.1.1 on purpose: 3.1.2+ requires langgraph-checkpoint 4.3, and this
-# repo is tested on 4.2. It also pulls sqlite-vec (a native binary) that only the
-# unused SqliteStore loads; the checkpointer never imports it. Raise on purpose.
+# Pinned exactly; raise on purpose. 3.1.2 fixes GHSA-6hmw-9432-67qq in
+# the SqliteStore (a "." in a label reached another namespace). AgentForge uses
+# only the checkpointer, not the store, but no install should carry a known flaw.
+# 3.1.2 needs langgraph-checkpoint >= 4.3 and migrates an older checkpoint file
+# on open (adds writes.task_path); a file written by 3.1.1 was checked to load,
+# show its pending approval and resume. It also pulls sqlite-vec (a native
+# binary) that only the unused SqliteStore loads; the checkpointer never does.
 durable = [
-    "langgraph-checkpoint-sqlite==3.1.1",
+    "langgraph-checkpoint-sqlite==3.1.2",
 ]
 
 [tool.setuptools.packages.find]

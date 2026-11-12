@@ -499,7 +499,8 @@ def sweep_stale_runs() -> dict:
     return hitl_graph.sweep()
 
 
-def resume_agent(thread_id: str, decision, approval_handler=None) -> str:
+def resume_agent(thread_id: str, decision, approval_handler=None,
+                 interrupt_id: str = None) -> str:
     """Resume a turn that was interrupted for human approval (Step 17f).
 
     ``thread_id`` is ``ApprovalRequired.thread_id`` from run_agent (Step
@@ -514,6 +515,10 @@ def resume_agent(thread_id: str, decision, approval_handler=None) -> str:
     decision. Resuming an approval that is no longer pending raises
     ValueError.
 
+    ``interrupt_id`` (optional, Step 31) is ``PendingApproval.interrupt_id`` of
+    the card the human answered. When given, a decision for an older card is
+    refused instead of being applied to whatever pause is waiting now.
+
     No intent re-classification happens here — the original classification is
     part of the paused turn. That (plus not re-running earlier steps) is why
     resume is both cheaper and more correct than replaying the turn: a replay
@@ -525,6 +530,23 @@ def resume_agent(thread_id: str, decision, approval_handler=None) -> str:
         raise TypeError("resume_agent takes the thread ID (ApprovalRequired.thread_id), "
                         f"not {type(thread_id).__name__}")
     pending = pending_approval(thread_id)  # ValueError if no longer pending
+    if interrupt_id is not None and interrupt_id != pending.interrupt_id:
+        # The card the human answered is not the pause waiting now: another
+        # tab resumed it and the turn paused again on a NEW call. Applying this
+        # decision to that new call would approve something nobody looked at.
+        log_event(f"{pending.pipeline}_resume_rejected",
+                  {"thread_id": thread_id, "reason": "stale card"},
+                  trace_id=pending.trace_id)
+        raise ValueError("This approval is no longer pending and cannot be resumed.")
+    # Step 31: hold the claim for the whole resume, so a second resume of
+    # the same approval (two tabs, one card) is refused and cannot run the
+    # tool again. Released when the resume ends, success or failure.
+    with hitl_graph.claimed(pending):
+        return _resume_pipeline(pending, thread_id, decision, approval_handler)
+
+
+def _resume_pipeline(pending, thread_id: str, decision, approval_handler) -> str:
+    """resume_agent's dispatch to the paused turn's pipeline (claim held)."""
     tid = pending.trace_id
     log_event("resume_start", {
         "pipeline": pending.pipeline,

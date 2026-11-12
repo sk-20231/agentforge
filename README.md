@@ -235,6 +235,8 @@ Following Meta's **"Agents Rule of Two"** (an agent session shouldn't combine un
 
 It was first built from primitives (an exception carrying the frozen loop state), then moved onto LangGraph's `interrupt()` + checkpointer ([`hitl_graph.py`](agentforge/hitl_graph.py)). The framework doesn't remove the replay problem — it moves it into the graph's shape. LangGraph saves state only *between* nodes and re-runs a paused node from its first line, so the LLM calls live in nodes that never pause, and the node that can pause runs **one** gated tool call per step. A loop over several gated calls inside one node would re-run every finished call on each later resume — in a test node with two approvals, the first tool ran twice.
 
+**Durable runs** (`AGENT_CHECKPOINTER=sqlite`, the `[durable]` extra) save paused turns to a local SQLite file, so an approval card survives a restart. Saving only between nodes leaves one gap: if the process dies after an approved tool returns but before its node is saved, the run is still "paused at the approval", and approving the card again would call the tool a second time. So the gateway records each tool result in a **journal** ([`tool_journal.py`](agentforge/tool_journal.py)) the moment the call returns, keyed by the node run's namespace — the same value as the pause's interrupt ID, and stable across a resume or a crash. When the node runs again, the recorded result is used instead of a second call; it still goes through sanitize, guardrail and the nonce wrap. The card says the call already ran, and a Deny tells the model *"it already ran; the user chose not to use the result"* — never "the call was not made", which would be false. A resume also **claims** its approval, so two tabs showing one card cannot both run it. The limit, stated plainly: a crash in the moment between the tool returning and the journal write still runs the tool twice. That is **at-least-once**, not exactly-once — exactly-once needs a tool that accepts an idempotency key itself. A turn that a crash stopped in the middle of a node is deleted at startup, not finished: nobody is waiting for the answer.
+
 ### 6. Model routing — reuse a signal you already have
 
 Sending every turn to a frontier model is wasteful when most turns are easy. A router estimates each turn's difficulty and keeps routine turns on a small model, escalating only the hard ones.
@@ -289,7 +291,8 @@ agentforge/
 │   ├── safety.py                 # Sanitize, nonce spotlight wrap, SSRF URL guard
 │   ├── approval.py               # Human-in-the-loop contract: request, decision, handler
 │   ├── hitl_graph.py             # Shared LangGraph runtime: interrupt bridge, checkpointer, resume
-│   ├── sqlite_saver.py           # Optional SQLite checkpointer: paused turns survive a restart
+│   ├── sqlite_saver.py           # Optional SQLite checkpointer + tool journal: paused turns survive a restart
+│   ├── tool_journal.py           # Tool-call journal + resume claims: a call that ran before a crash is not repeated
 │   ├── guardrail.py              # Injection classifier for untrusted text (optional local model)
 │   ├── output_guardrail.py       # PII redaction on the final reply (regex / Presidio)
 │   ├── redteam.py                # Red-team harnesses: classifier, full-stack, PII

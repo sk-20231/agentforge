@@ -30,6 +30,7 @@ from agentforge.hitl_graph import (
     GraphApprovalHandler,
     PendingApproval,
     apending_approval,
+    journal_slot,
     new_thread_id,
     pending_approval,
     run_graph,
@@ -271,7 +272,8 @@ async def _dispatch_node(state: _ActState, runtime: Runtime[_ActContext]) -> dic
                        index, call["name"])
         content = "Error: Tool arguments were invalid."
     else:
-        content = await gw.call(call["name"], arguments)
+        # journal_slot (Step 31): a call that ran before a crash is not repeated.
+        content = await gw.call(call["name"], arguments, journal=journal_slot())
 
     return {
         "tool_messages": [*state["tool_messages"],

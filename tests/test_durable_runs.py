@@ -250,7 +250,7 @@ class TestSweep:
         with patch.object(hitl_graph, "log_event") as log:
             counts = hitl_graph.sweep()
 
-        assert counts == {"kept": 1, "expired": 0, "abandoned": 1}
+        assert counts == {"kept": 1, "expired": 0, "abandoned": 1, "journal_orphans": 0}
         assert hitl_graph.thread_ids() == ["test-paused"]
         events = {call.args[0]: call for call in log.call_args_list}
         assert events["run_abandoned"].args[1] == {"thread_id": "test-crashed"}
@@ -262,7 +262,7 @@ class TestSweep:
         monkeypatch.setattr(hitl_graph, "AGENT_APPROVAL_TTL_SECONDS", 60)
         _pause(_graph(hitl_graph.CHECKPOINTER), "test-old")
         later = datetime.now(timezone.utc) + timedelta(minutes=5)
-        assert hitl_graph.sweep(now=later) == {"kept": 0, "expired": 1, "abandoned": 0}
+        assert hitl_graph.sweep(now=later) == {"kept": 0, "expired": 1, "abandoned": 0, "journal_orphans": 0}
         assert hitl_graph.thread_ids() == []
 
     def test_in_memory_thread_ids_skip_deleted_threads(self):
@@ -320,7 +320,7 @@ def test_act_turn_survives_a_restart(tmp_path, monkeypatch, open_savers):
         thread_id = excinfo.value.thread_id
 
         _use_saver(monkeypatch, open_savers(path))        # the restart
-        assert hitl_graph.sweep() == {"kept": 1, "expired": 0, "abandoned": 0}
+        assert hitl_graph.sweep() == {"kept": 1, "expired": 0, "abandoned": 0, "journal_orphans": 0}
         assert main.pending_approvals("someone-else") == []
         [pending] = main.pending_approvals("u1")
         assert pending.thread_id == thread_id

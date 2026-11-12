@@ -404,7 +404,7 @@ class _GatedGateway:
     def has_tools(self):
         return True
 
-    async def call(self, tool_name, arguments):
+    async def call(self, tool_name, arguments, journal=None):
         request = ApprovalRequest(tool=tool_name, server="fetch", arguments=arguments)
         handler = self.approval_handler
         decision = handler(request) if handler is not None else False

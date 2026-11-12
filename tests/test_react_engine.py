@@ -32,7 +32,7 @@ class _FakeGateway:
     def has_tools(self):
         return bool(self.catalog)
 
-    async def call(self, tool_name, arguments):
+    async def call(self, tool_name, arguments, journal=None):
         self.calls.append((tool_name, arguments))
         return self._call_result
 
@@ -622,7 +622,7 @@ class TestReactTraceId:
 
         class _GatedGateway(_FakeGateway):
             # Like the real gate: consult the handler, which may pause the turn.
-            async def call(self, tool_name, arguments):
+            async def call(self, tool_name, arguments, journal=None):
                 return self.approval_handler(
                     ApprovalRequest(tool_name, "ext", arguments))
 

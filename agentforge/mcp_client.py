@@ -304,7 +304,8 @@ class MCPGateway:
 
         return _walk(arguments or {})
 
-    async def call(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+    async def call(self, tool_name: str, arguments: Dict[str, Any],
+                   journal=None) -> str:
         """Dispatch one tool call on the already-open session for that tool.
 
         Returns the tool's text result. An unknown tool name (not discovered from
@@ -321,6 +322,13 @@ class MCPGateway:
         output. For **untrusted** servers (ones we didn't write) one extra guard
         applies (Step 17d): an **SSRF URL guard** refuses to dispatch if an
         argument is an http(s) URL pointing at an internal/private address.
+
+        ``journal`` (Step 31, issue #80) is this call's ``tool_journal.JournalSlot``
+        — the pipelines pass ``hitl_graph.journal_slot()``. The raw result is
+        recorded the moment the tool returns; if the node runs again (a resume
+        after a crash), the recorded result is used and the tool is NOT called
+        again. A replayed result still goes through sanitize, guardrail and the
+        nonce wrap, with this turn's nonce. None (the default) = no journal.
         """
         # Audit args by KEY NAME only — values can hold PII/secrets (a user query,
         # a tokened URL) and must never reach the log sink (Step 17e gap A).
@@ -387,6 +395,16 @@ class MCPGateway:
                             f"approval handler is configured — the call was not made.")
                 decision = self.approval_handler(request)
                 if not decision:
+                    if self._journal_lookup(journal, tool_name) is not None:
+                        # The call ran before a crash; a Deny cannot undo it.
+                        # Telling the model "the call was not made" would be
+                        # false, and it could repeat that to the user. So say
+                        # what happened, and withhold the result as asked.
+                        self._audit(tool_name, server, trusted, arg_keys, "denied",
+                                    reason="user declined; call already ran")
+                        return (f"Note: tool '{tool_name}' already ran before the app "
+                                f"restarted, so its effects have happened. The user "
+                                f"chose not to use its result, which is withheld.")
                     self._audit(tool_name, server, trusted, arg_keys, "denied",
                                 reason="user declined")
                     return (f"Error: the user declined permission for tool "
@@ -405,10 +423,19 @@ class MCPGateway:
 
         start = time.perf_counter()
         try:
-            result = await session.call_tool(tool_name, arguments)
-            text = " ".join(c.text for c in result.content if hasattr(c, "text"))
+            saved = self._journal_lookup(journal, tool_name)
+            replayed = saved is not None
+            if replayed:
+                text, is_error = saved.text, saved.is_error
+                self._audit(tool_name, server, trusted, arg_keys, "journal_replayed",
+                            result_len=len(text))
+            else:
+                result = await session.call_tool(tool_name, arguments)
+                text = " ".join(c.text for c in result.content if hasattr(c, "text"))
+                is_error = bool(result.isError)
+                self._journal_record(journal, tool_name, text, is_error)
             duration_ms = (time.perf_counter() - start) * 1000
-            if result.isError:
+            if is_error:
                 # Issue #70: an error result is server-written text too, so it
                 # takes the SAME path as a success — sanitize, guardrail, nonce
                 # wrap. Returned raw, it reached the model as if it were ours:
@@ -417,7 +444,8 @@ class MCPGateway:
                 # (stopped without trying another source, 7 of 8 runs). A hostile
                 # server could put anything there. Only the prefix is ours.
                 self._audit(tool_name, server, trusted, arg_keys, "tool_error",
-                            result_len=len(text), duration_ms=duration_ms)
+                            result_len=len(text), duration_ms=duration_ms,
+                            **({"replayed": True} if replayed else {}))
                 if not trusted:
                     text = sanitize_external_block(text)
                 guard_block = self._guardrail_block(text, tool_name, server, trusted, arg_keys)
@@ -440,7 +468,8 @@ class MCPGateway:
             if guard_block is not None:
                 return guard_block
             self._audit(tool_name, server, trusted, arg_keys, "ok",
-                        result_len=len(text), duration_ms=duration_ms)
+                        result_len=len(text), duration_ms=duration_ms,
+                        **({"replayed": True} if replayed else {}))
             # Spotlight ALL tool output with this turn's nonce (Step 17e). The
             # gateway is the single trust boundary: it wraps trusted and untrusted
             # servers alike rather than trusting any server to mark its own output.
@@ -453,6 +482,35 @@ class MCPGateway:
             # error.message), so it gets the same wrap (issue #70).
             return "MCP tool error: " + wrap_untrusted(str(exc), source=server,
                                                        nonce=self.nonce)
+
+    def _journal_lookup(self, journal, tool_name: str):
+        """The journaled result for this call, or None. A journal that fails
+        to read counts as a miss: the tool runs again (at-least-once), which
+        is better than failing the call."""
+        if journal is None:
+            return None
+        try:
+            return journal.lookup()
+        except Exception as exc:  # noqa: BLE001 — never fail a tool call on the journal
+            logger.warning("Tool journal lookup failed for %s: %s", tool_name, exc)
+            log_event("journal_error", {"tool": tool_name, "op": "lookup",
+                                        "error": type(exc).__name__},
+                      trace_id=self.trace_id)
+            return None
+
+    def _journal_record(self, journal, tool_name: str, text: str, is_error: bool) -> None:
+        """Record a result the moment the tool returns. A failed write loses
+        replay for this one call but must not hide a result the tool already
+        produced — the model would think the call failed when it ran."""
+        if journal is None:
+            return
+        try:
+            journal.record(text, is_error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Tool journal write failed for %s: %s", tool_name, exc)
+            log_event("journal_error", {"tool": tool_name, "op": "record",
+                                        "error": type(exc).__name__},
+                      trace_id=self.trace_id)
 
     def _guardrail_block(self, text: str, tool_name: str, server: str, trusted: bool,
                          arg_keys) -> Optional[str]:

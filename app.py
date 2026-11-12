@@ -82,6 +82,8 @@ if "pending_thread_id" not in st.session_state:
     st.session_state.pending_thread_id = None  # handle of the paused turn
 if "resume_decision" not in st.session_state:
     st.session_state.resume_decision = None   # True/False once a button is clicked
+if "pending_interrupt_id" not in st.session_state:
+    st.session_state.pending_interrupt_id = None  # which pause the card showed (Step 31)
 
 
 # ── Durable runs (Step 31): clean up, then restore a card after a restart ──
@@ -180,12 +182,18 @@ def _clear_pending_turn():
     st.session_state.resume_decision = None
     st.session_state.pending_input = None
     st.session_state.pending_tid = None
+    st.session_state.pending_interrupt_id = None
 
 
 req = None
+already_ran = False
 if st.session_state.pending_thread_id is not None and st.session_state.resume_decision is None:
     try:
-        req = pending_approval(st.session_state.pending_thread_id).request
+        shown = pending_approval(st.session_state.pending_thread_id)
+        req, already_ran = shown.request, shown.already_ran
+        # The resume sends this back, so a click on this card can never be
+        # applied to a different pause (another tab moved the turn on).
+        st.session_state.pending_interrupt_id = shown.interrupt_id
     except ApprovalExpired:
         # Waited longer than AGENT_APPROVAL_TTL_SECONDS; already deleted and logged.
         logger.info("Pending approval %s expired; clearing it",
@@ -203,6 +211,12 @@ if st.session_state.pending_thread_id is not None and st.session_state.resume_de
 if req is not None:
     with st.chat_message("assistant"):
         st.warning("The agent wants to call a tool that requires your approval.")
+        if already_ran:
+            # Step 31: the call ran before a crash (it is in the tool journal).
+            # Approving cannot make it happen again, and denying cannot undo it.
+            st.error("This call already ran before the app restarted. **Allow** uses "
+                     "the saved result, and the tool will not run again. **Deny** "
+                     "does not undo it.")
         st.code(
             json.dumps(
                 {"tool": req.tool, "server": req.server, "arguments": req.arguments},
@@ -260,10 +274,13 @@ if st.session_state.pending_input is not None and (
             if ready_to_resume:
                 thread_id = st.session_state.pending_thread_id
                 decision = st.session_state.resume_decision
+                interrupt_id = st.session_state.pending_interrupt_id
                 st.session_state.pending_thread_id = None
                 st.session_state.resume_decision = None
+                st.session_state.pending_interrupt_id = None
                 result = resume_agent(thread_id, decision,
-                                      approval_handler=_streamlit_approval_handler)
+                                      approval_handler=_streamlit_approval_handler,
+                                      interrupt_id=interrupt_id)
                 st.markdown(result)
             else:
                 result = run_agent(

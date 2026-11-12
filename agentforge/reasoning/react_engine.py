@@ -32,6 +32,7 @@ from agentforge.hitl_graph import (
     GraphApprovalHandler,
     PendingApproval,
     apending_approval,
+    journal_slot,
     new_thread_id,
     pending_approval,
     run_graph,
@@ -499,7 +500,9 @@ async def _act_node(state: _ReactState, runtime: Runtime[_ReactContext]) -> dict
     # wraps the tool output as untrusted data with this turn's nonce
     # (Step 17e) — the spotlight rule in the prompt tells the model to
     # treat anything inside those markers as data, never instructions.
-    observation = await gw.call(tool_name, state["tool_input"])
+    # journal_slot (Step 31): if this node already ran the call before a
+    # crash, the gateway uses the recorded result instead of calling again.
+    observation = await gw.call(tool_name, state["tool_input"], journal=journal_slot())
 
     # The ReAct loop speaks the prompt-based JSON protocol: the model
     # returns {thought, action} as assistant *content*, not native

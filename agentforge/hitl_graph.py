@@ -20,18 +20,25 @@ node can pause for human approval. What they share lives here, once:
 - ``discard`` deletes a paused turn the user abandoned.
 - ``thread_ids`` / ``is_paused`` / ``sweep`` find saved turns after a restart:
   paused ones are kept, the rest (a crash mid-node) are deleted, not re-driven.
+- ``journal`` / ``journal_slot`` / ``claimed`` — the tool-call journal and
+  resume claims (``agentforge.tool_journal``, Step 31 part 2): a call that ran
+  before a crash is not run again, and one approval is resumed only once.
 
 The rule both graphs are built around: LangGraph saves state only BETWEEN
 nodes, and on resume re-runs the paused node from its first line. So the
 non-deterministic LLM calls live in nodes that never pause, and a node that
 can pause makes at most ONE gated call per run, reading it from saved state.
 """
+import asyncio
+import contextlib
 import uuid
+import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.config import get_config
 from langgraph.types import interrupt
 
 from agentforge.approval import ApprovalRequest, ApprovalRequired
@@ -41,6 +48,7 @@ from agentforge.config import (
     AGENT_CHECKPOINTER,
 )
 from agentforge.logger import log_event
+from agentforge.tool_journal import JournalSlot, MemoryJournal, call_key
 
 # The channel LangGraph saves a pause under: a pending write on the turn's
 # top-level checkpoint — also when the pause happened inside a nested graph
@@ -81,6 +89,39 @@ def is_durable() -> bool:
     return not isinstance(CHECKPOINTER, InMemorySaver)
 
 
+# One journal per checkpointer, created on first use. Keyed weakly by the
+# checkpointer object, so a swapped CHECKPOINTER (tests) gets its own.
+_JOURNALS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def journal():
+    """The tool-call journal that goes with ``CHECKPOINTER``: in the same
+    SQLite file when durable, in the process otherwise."""
+    found = _JOURNALS.get(CHECKPOINTER)
+    if found is None:
+        make = getattr(CHECKPOINTER, "make_journal", None)
+        found = _JOURNALS[CHECKPOINTER] = make() if make else MemoryJournal()
+    return found
+
+
+def journal_slot() -> Optional[JournalSlot]:
+    """The journal place for the tool call the CURRENT graph node is making —
+    call it from inside a node and pass it to ``gw.call``. The key is the
+    node run's namespace, so it is the same when the node runs again after a
+    resume or a crash. None outside a graph (no journaling)."""
+    try:
+        conf = get_config()["configurable"]
+    except RuntimeError:
+        return None
+    return JournalSlot(journal(), conf["thread_id"], call_key(conf["checkpoint_ns"]))
+
+
+def _delete_run(thread_id: str) -> None:
+    """Delete a run's checkpoints AND its journal rows and claims."""
+    CHECKPOINTER.delete_thread(thread_id)
+    journal().delete_thread(thread_id)
+
+
 def new_thread_id(pipeline: str) -> str:
     """A fresh per-turn thread ID that names its pipeline, e.g. ``act-3f9a…``."""
     return f"{pipeline}-{uuid.uuid4().hex}"
@@ -106,6 +147,8 @@ class PendingApproval:
     trace_id: Optional[str]
     values: dict
     paused_at: Optional[datetime] = None   # last saved checkpoint (Step 31)
+    interrupt_id: Optional[str] = None     # which pause this is; the claim key
+    already_ran: bool = False              # the call ran before a crash (journaled)
 
 
 class GraphApprovalHandler:
@@ -193,7 +236,7 @@ def _expired(paused_at: Optional[datetime], now: Optional[datetime] = None) -> b
 
 def _expire(thread_id: str, paused_at: datetime, trace_id: Optional[str],
             now: Optional[datetime] = None) -> None:
-    CHECKPOINTER.delete_thread(thread_id)
+    _delete_run(thread_id)
     log_event("approval_expired",
               {"thread_id": thread_id, "age_seconds": round(_age_seconds(paused_at, now)),
                "ttl_seconds": AGENT_APPROVAL_TTL_SECONDS},
@@ -211,6 +254,7 @@ def _pending_from_snapshot(snapshot, thread_id: str, pipeline: str) -> PendingAp
                   trace_id=snapshot.values.get("trace_id"))
         raise ValueError("This approval is no longer pending and cannot be resumed.")
     payload = waiting[0].value
+    interrupt_id = waiting[0].id
     values = dict(snapshot.values)
     paused_at = last_activity(thread_id)
     if _expired(paused_at):
@@ -223,7 +267,9 @@ def _pending_from_snapshot(snapshot, thread_id: str, pipeline: str) -> PendingAp
         request=ApprovalRequest(tool=payload["tool"], server=payload["server"],
                                 arguments=payload["arguments"]),
         user_id=values.get("user_id", ""), trace_id=values.get("trace_id"),
-        values=values, paused_at=paused_at)
+        values=values, paused_at=paused_at, interrupt_id=interrupt_id,
+        # The paused call's journal key IS its interrupt ID (tool_journal).
+        already_ran=journal().lookup(thread_id, interrupt_id) is not None)
 
 
 def pending_approval(graph, thread_id: str, pipeline: str) -> PendingApproval:
@@ -249,7 +295,7 @@ def discard(thread_id: str, reason: str) -> None:
     the turn's own trace (read from its saved state before deletion), so it
     is not orphaned from the turn it ends (issue #7)."""
     trace_id = _saved_trace_id(CHECKPOINTER.get_tuple(_thread_config(thread_id)))
-    CHECKPOINTER.delete_thread(thread_id)
+    _delete_run(thread_id)
     log_event("approval_discarded", {"thread_id": thread_id, "reason": reason},
               trace_id=trace_id)
 
@@ -265,6 +311,9 @@ def sweep(now: Optional[datetime] = None) -> dict:
     finishing it would spend tokens — and maybe call tools — for nobody.
     """
     counts = {"kept": 0, "expired": 0, "abandoned": 0}
+    # Claims belong to resumes in flight; at startup none are, so any left
+    # are from a process that died mid-resume and would block the card.
+    journal().clear_claims()
     for thread_id in thread_ids():
         saved = CHECKPOINTER.get_tuple(_thread_config(thread_id))
         trace_id = _saved_trace_id(saved)
@@ -276,11 +325,38 @@ def sweep(now: Optional[datetime] = None) -> dict:
             else:
                 counts["kept"] += 1
             continue
-        CHECKPOINTER.delete_thread(thread_id)
+        _delete_run(thread_id)
         log_event("run_abandoned", {"thread_id": thread_id}, trace_id=trace_id)
         counts["abandoned"] += 1
+    # Journal rows whose run is gone: a crash between deleting the checkpoints
+    # and the journal rows of a finished turn.
+    orphans = journal().thread_ids() - set(thread_ids())
+    for thread_id in orphans:
+        journal().delete_thread(thread_id)
+    counts["journal_orphans"] = len(orphans)
     log_event("checkpoint_sweep", {**counts, "durable": is_durable()})
     return counts
+
+
+@contextlib.contextmanager
+def claimed(pending: PendingApproval):
+    """Hold the resume claim on ``pending`` for the length of one resume.
+    A second resume of the same approval while this one runs (two tabs, one
+    card) is refused with ValueError, so it cannot run the tool again.
+    A ``PendingApproval`` built without an interrupt ID (one not read from a
+    checkpoint) has nothing to claim, and resumes as before."""
+    if pending.interrupt_id is None:
+        yield
+        return
+    if not journal().claim(pending.thread_id, pending.interrupt_id):
+        log_event(f"{pending.pipeline}_resume_rejected",
+                  {"thread_id": pending.thread_id, "reason": "already being resumed"},
+                  trace_id=pending.trace_id)
+        raise ValueError("This approval is already being resumed.")
+    try:
+        yield
+    finally:
+        journal().release(pending.thread_id, pending.interrupt_id)
 
 
 async def run_graph(graph, graph_input, *, thread_id: str, recursion_limit: int,
@@ -319,3 +395,4 @@ async def run_graph(graph, graph_input, *, thread_id: str, recursion_limit: int,
     finally:
         if not paused:
             await CHECKPOINTER.adelete_thread(thread_id)
+            await asyncio.to_thread(journal().delete_thread, thread_id)

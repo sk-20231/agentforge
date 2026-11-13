@@ -112,6 +112,25 @@ When a tool returns an error or nothing useful, do these steps in order:
 Never end with "I cannot access the information" before step 1 is done.
 """
 
+# Issue #90: the observation for a plain Deny. "Error: … the call was not made"
+# alone was read by REACT as an ordinary tool error, and REACT_TOOL_ERROR_RECOVERY
+# then let it answer from general knowledge — gpt-4o-mini summarised the article
+# from memory as if it had read it, never mentioning the Deny (0 of 6 runs in the
+# Deny-honesty eval). So it says what the reply must contain, like the
+# already-ran message below. Product decision: no general knowledge in this
+# reply, even labelled — one simple rule; the user can ask again. (A version
+# that allowed labelled knowledge got replies the judge could not tell from a
+# summary.) The rule lives HERE, not in a system prompt: a system-prompt line
+# about declined tools made REACT skip the tool call in 8 of 12 runs.
+# ``{tool}`` is the tool name.
+USER_DECLINED = (
+    "Error: the user declined permission for tool '{tool}' — the call was not made, "
+    "and you do not have its result. Do not answer the question from your own "
+    "knowledge, and do not call another tool to get the same information. In your "
+    "reply, only say that the user declined the tool, so you cannot answer this "
+    "part. The user can ask again."
+)
+
 # Issue #86: the observation for a Deny of a call that ALREADY RAN before a
 # crash (Step 31 journal). The result is withheld, but the action happened, so
 # the model must not say "not made" — and must not answer as if it had the
@@ -119,12 +138,16 @@ Never end with "I cannot access the information" before step 1 is done.
 # summarise the page from memory and never mention the tool (3 of 3 runs);
 # starting with "Error:" (like the plain Deny) and giving the reply's content
 # explicitly is the fix. ``{tool}`` is the tool name.
+# The deny-honesty eval then caught "I attempted to read…" in ACT replies.
+# "Attempted" suggests the action may not have happened — for a tool that
+# writes, the user would think it did not. So the reply must say it RAN.
 ALREADY_RAN_DECLINED = (
     "Error: the user declined to use the result of tool '{tool}'. The call had "
     "already run before the app restarted, so whatever it does has already "
     "happened, but its result is withheld and you do not have it. Do not "
     "describe, summarise or guess what it returned. In your reply, tell the user "
-    "that this tool already ran and that its result was not used."
+    "that this tool already ran and that its result was not used. Say plainly "
+    "that it ran — do not say you 'attempted' or 'tried' to use it."
 )
 
 # Issue #8 (query-focused observation compression): an oversized tool

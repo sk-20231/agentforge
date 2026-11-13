@@ -59,7 +59,7 @@ from agentforge.config import (
     MCP_SERVERS,
 )
 from agentforge.logger import log_event
-from agentforge.prompts import ALREADY_RAN_DECLINED
+from agentforge.prompts import ALREADY_RAN_DECLINED, USER_DECLINED
 from agentforge.safety import (
     fingerprint_tool,
     is_safe_url,
@@ -407,8 +407,7 @@ class MCPGateway:
                         return ALREADY_RAN_DECLINED.format(tool=tool_name)
                     self._audit(tool_name, server, trusted, arg_keys, "denied",
                                 reason="user declined")
-                    return (f"Error: the user declined permission for tool "
-                            f"'{tool_name}' — the call was not made.")
+                    return USER_DECLINED.format(tool=tool_name)
                 if decision == APPROVE_TURN:
                     # The gateway, not the handler, owns grant semantics: record
                     # the (server, tool) pair so later calls this turn skip the

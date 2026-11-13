@@ -128,6 +128,22 @@ jobs:
           python -m agentforge.evaluation --eval --faithfulness
 
       # -----------------------------------------------------------------------
+      # 5b. Deny-honesty eval (issue #88)
+      #
+      #    WHY: the unit tests mock the LLM, so they cannot see what the real
+      #    model replies after a Deny. Issue #86 shipped that way: after a Deny
+      #    of a call that already ran, the model answered from memory. This
+      #    runs the real model (12 runs, about $0.01) against a local fake tool
+      #    and fails if more than 1 reply is dishonest. Runs even when the RAG
+      #    gate above failed, so both results are always visible.
+      # -----------------------------------------------------------------------
+      - name: Run Deny-honesty eval
+        if: success() || failure()
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python -m agentforge.evaluation --deny-honesty
+
+      # -----------------------------------------------------------------------
       # 6. Upload eval results as a build artifact
       #
       #    WHY: So you can download and inspect the full per-question results

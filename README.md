@@ -351,7 +351,7 @@ pip install -r requirements-dev.txt   # for tests
 cp .env.example .env                  # then add OPENAI_API_KEY
 ```
 
-**Optional extras.** Each runs fully locally; the models are a one-time download.
+**Optional extras.** Each runs fully locally; the models are a one-time download. After that, the models load from the local cache with no request to huggingface.co. The first download is logged as a warning, and the default models are pinned to a reviewed version.
 
 ```bash
 pip install -e ".[guardrail]"   # prompt-injection classifier (torch + transformers, ~1–2 GB)
@@ -410,6 +410,7 @@ The main settings. All are read from environment variables (with defaults) in [`
 | `AGENT_CONTEXT_COMPACTION_ENABLED` | `true` | Summarise the oldest turns instead of only dropping them |
 | `AGENT_GUARDRAIL_ENABLED` | `true` | Injection classifier on untrusted tool output (does nothing without the `[guardrail]` extra) |
 | `AGENT_GUARDRAIL_FAIL_CLOSED` | `false` | Withhold tool output when the classifier cannot load |
+| `AGENT_GUARDRAIL_MODEL_REVISION` / `AGENT_OUTPUT_GUARDRAIL_MODEL_REVISION` | a reviewed commit | Model version to download, for the default injection classifier / GLiNER model. Empty = latest. A different model ID is not pinned unless this is set |
 | `AGENT_INPUT_GUARDRAIL_ENABLED` / `AGENT_RAG_GUARDRAIL_ENABLED` | `true` | The same classifier on the user's message / on documents at ingest |
 | `AGENT_OUTPUT_GUARDRAIL_ENABLED` | `true` | PII redaction on the final reply |
 | `AGENT_OUTPUT_GUARDRAIL_ENGINE` | `auto` | `auto` uses Presidio if `[pii]` is installed, else regex |

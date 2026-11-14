@@ -80,6 +80,18 @@ def _env_flag(name: str, default: bool) -> bool:
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
+
+def _pinned_revision(env_name: str, model_id: str, default_id: str, pin: str):
+    """The Hub commit to load for a model (issue #60), or None for the latest.
+
+    ``env_name`` set → that value ("" means latest). Unset → ``pin``, but only
+    when ``model_id`` is the default model: the pin is a commit of THAT repo.
+    """
+    raw = os.environ.get(env_name)
+    if raw is None:
+        raw = pin if model_id == default_id else ""
+    return raw.strip() or None
+
 # User text in the trace log (agent_logs.jsonl). OFF by default: the log records
 # only the LENGTH of the user's message, the reply, remembered facts, document
 # questions, the REACT thought and tool arguments (tool arguments fall back to
@@ -112,9 +124,16 @@ AGENT_GUARDRAIL_ENABLED = _env_flag("AGENT_GUARDRAIL_ENABLED", True)
 # (gated: requires approved HF access), set this to
 # "meta-llama/Llama-Prompt-Guard-2-86M". The label handling in guardrail.py is
 # model-agnostic (it keys off SAFE/BENIGN vs INJECTION/MALICIOUS), so either works.
-AGENT_GUARDRAIL_MODEL_ID = os.environ.get(
-    "AGENT_GUARDRAIL_MODEL_ID", "ProtectAI/deberta-v3-base-prompt-injection-v2"
-)
+_DEFAULT_GUARDRAIL_MODEL_ID = "ProtectAI/deberta-v3-base-prompt-injection-v2"
+AGENT_GUARDRAIL_MODEL_ID = os.environ.get("AGENT_GUARDRAIL_MODEL_ID", _DEFAULT_GUARDRAIL_MODEL_ID)
+# Pinned model version (a Hub commit) — issue #60. A download fetches exactly
+# the reviewed weights, never whatever was pushed since. The pin applies only
+# to the default model; a different AGENT_GUARDRAIL_MODEL_ID loads its latest
+# version unless this is set too. Empty = latest.
+_GUARDRAIL_MODEL_PIN = "90c9989b1a342275dd0d1a95aad283c04e075671"
+AGENT_GUARDRAIL_MODEL_REVISION = _pinned_revision(
+    "AGENT_GUARDRAIL_MODEL_REVISION", AGENT_GUARDRAIL_MODEL_ID,
+    _DEFAULT_GUARDRAIL_MODEL_ID, _GUARDRAIL_MODEL_PIN)
 # Malicious-probability cutoff at/above which output is treated as an attack.
 # Raise it to cut false positives, lower it to be stricter (Meta suggests tuning).
 AGENT_GUARDRAIL_THRESHOLD = float(os.environ.get("AGENT_GUARDRAIL_THRESHOLD", "0.5"))
@@ -167,9 +186,15 @@ AGENT_OUTPUT_GUARDRAIL_ENGINE = os.environ.get("AGENT_OUTPUT_GUARDRAIL_ENGINE", 
 # GLiNER NER model for the Presidio engine. Default is the ungated, Apache-2.0,
 # commercial-OK PII model (person / address / etc.). Pinned so we never silently pull a
 # CC-BY-NC variant. Local inference only; weights are a one-time HuggingFace download.
+_DEFAULT_OUTPUT_GUARDRAIL_MODEL_ID = "urchade/gliner_multi_pii-v1"
 AGENT_OUTPUT_GUARDRAIL_MODEL_ID = os.environ.get(
-    "AGENT_OUTPUT_GUARDRAIL_MODEL_ID", "urchade/gliner_multi_pii-v1"
+    "AGENT_OUTPUT_GUARDRAIL_MODEL_ID", _DEFAULT_OUTPUT_GUARDRAIL_MODEL_ID
 )
+# Pinned GLiNER version (a Hub commit) — same rule as AGENT_GUARDRAIL_MODEL_REVISION.
+_OUTPUT_GUARDRAIL_MODEL_PIN = "1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d"
+AGENT_OUTPUT_GUARDRAIL_MODEL_REVISION = _pinned_revision(
+    "AGENT_OUTPUT_GUARDRAIL_MODEL_REVISION", AGENT_OUTPUT_GUARDRAIL_MODEL_ID,
+    _DEFAULT_OUTPUT_GUARDRAIL_MODEL_ID, _OUTPUT_GUARDRAIL_MODEL_PIN)
 # Confidence cutoff for the Presidio engine: detections below this score are dropped
 # (filters the low-confidence NER/pattern noise observed at <0.1).
 AGENT_OUTPUT_GUARDRAIL_THRESHOLD = float(

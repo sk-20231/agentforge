@@ -403,6 +403,7 @@ The main settings. All are read from environment variables (with defaults) in [`
 | `OPENAI_BASE_URL` | (OpenAI default) | Custom API base URL |
 | `AGENT_MEMORY_DIR` | `memory` | Directory for user memory files |
 | `AGENT_LOG_FILE` | `agent_logs.jsonl` | Event log file |
+| `AGENT_LOG_USER_TEXT` | `false` | Write user text to the event log and console (the message, the reply, remembered facts, REACT thoughts, tool arguments). Off: only lengths and argument names. On: the text after a regex PII scrub, which does not catch names or free-text details. For local debugging only |
 | `AGENT_CORPUS_FILE` | `corpus.json` | RAG document corpus file |
 | `AGENT_TOOL_PINS_FILE` | `tool_pins.json` | Pinned hashes of third-party tool definitions |
 | `HISTORY_TOKEN_BUDGET` | `2000` | Max tokens kept in history before compaction or trimming |

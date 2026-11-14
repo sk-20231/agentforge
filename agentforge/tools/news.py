@@ -29,7 +29,7 @@ def get_top_news(topic: str) -> str:
     the MCP gateway wraps tool output as untrusted data with the turn's nonce
     (Step 17e). Per-title sanitization (titles are user-submitted) stays here.
     """
-    logger.info("HN news lookup invoked for topic: %s", topic)
+    logger.info("HN news lookup invoked (topic %d chars)", len(topic or ""))
     if not topic or not isinstance(topic, str):
         raise ValueError("topic must be a non-empty string")
 

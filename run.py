@@ -16,7 +16,7 @@ import json
 
 from agentforge.approval import APPROVE_TURN, ApprovalRequest
 from agentforge.main import run_agent, sweep_stale_runs
-from agentforge.logger import log_event
+from agentforge.logger import log_event, user_text_fields
 from agentforge.tools import prime_tool_catalog
 
 
@@ -64,7 +64,7 @@ if __name__ == "__main__":
             break
 
         try:
-            log_event("user_input", {"text": user_input})
+            log_event("user_input", user_text_fields("text", user_input))
 
             # stream=True: ANSWER/RESPOND_WITH_MEMORY intents return a generator.
             # All other intents still return a plain str — no change for them.
@@ -74,7 +74,7 @@ if __name__ == "__main__":
 
             if isinstance(result, str):
                 # Non-streaming intents (REMEMBER, ACT, REACT, DOCS_QA, IGNORE).
-                log_event("final_answer", {"text": result, "streamed": False})
+                log_event("final_answer", {**user_text_fields("text", result), "streamed": False})
                 print("Agent:", result)
             else:
                 # Streaming intent (ANSWER / RESPOND_WITH_MEMORY).
@@ -89,7 +89,7 @@ if __name__ == "__main__":
                     full_text += token
                 print()  # newline after the streamed response
                 result = full_text
-                log_event("final_answer", {"text": result, "streamed": True})
+                log_event("final_answer", {**user_text_fields("text", result), "streamed": True})
 
             history.append({"role": "user", "content": user_input})
             history.append({"role": "assistant", "content": result})

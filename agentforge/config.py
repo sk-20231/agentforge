@@ -80,6 +80,18 @@ def _env_flag(name: str, default: bool) -> bool:
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
+# User text in the trace log (agent_logs.jsonl). OFF by default: the log records
+# only the LENGTH of the user's message, the reply, remembered facts, document
+# questions, the REACT thought and tool arguments (tool arguments fall back to
+# their key names). WHY off: a deployed app ships this log to a cloud log
+# service that keeps and indexes it, and these fields hold whatever the user
+# typed — names, emails, health details. Safe by default means a deployment
+# that forgets this setting still logs no user text. Turn it ON for local
+# debugging; the text is then passed through the regex PII scrub first (the
+# same one tool arguments use), which catches structured PII such as emails
+# and card numbers, but NOT names or free-text details.
+AGENT_LOG_USER_TEXT = _env_flag("AGENT_LOG_USER_TEXT", False)
+
 # CONTEXT ENGINEERING — compaction (Step 18a). When history exceeds the budget,
 # the default (Step 2) behaviour was to DELETE the oldest turns outright, losing
 # their information forever. With compaction ON, those oldest turns are instead

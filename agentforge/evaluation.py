@@ -833,6 +833,17 @@ def review_draft_interactive(draft: dict, input_fn=input) -> dict | None:
         entry["id"] = ask("id", entry["id"]) or entry["id"]
         entry["difficulty"] = ask("difficulty (easy/medium/hard)", entry["difficulty"])
 
+        # The task text is empty when the trace was written with
+        # AGENT_LOG_USER_TEXT off (the default): the log kept only its length.
+        # A case without a task cannot be replayed, so ask for it.
+        if not (entry.get("task") or "").strip():
+            print("  The trace did not log the task text (AGENT_LOG_USER_TEXT is "
+                  "off). Type the user's request.")
+        while not (entry.get("task") or "").strip():
+            entry["task"] = input_fn("task (REQUIRED — the user's request): ").strip()
+            if not entry["task"]:
+                print("  task cannot be empty.")
+
         tools_raw = ask("expected_tools (comma-separated)",
                         ", ".join(entry["expected_tools"]))
         entry["expected_tools"] = [t.strip() for t in tools_raw.split(",") if t.strip()]

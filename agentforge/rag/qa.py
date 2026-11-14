@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from openai import OpenAI
 from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
 from agentforge.rag.document_store import search_docs
-from agentforge.logger import log_event, Span, log_token_usage
+from agentforge.logger import log_event, Span, log_token_usage, user_text_fields
 from agentforge.conversation import rewrite_query
 from agentforge.safety import sanitize_external_block, wrap_untrusted, new_spotlight_nonce
 from agentforge.prompts import SPOTLIGHT_INSTRUCTIONS, history_for_chat
@@ -146,7 +146,7 @@ def _stream_rag_tokens(
     citations_removed = full_text != clean_answer
 
     log_event("docs_qa_answer", {
-        "query": user_input,
+        **user_text_fields("query", user_input),
         "raw_answer_length": len(full_text),
         "token_count": token_count,
         "citations_removed": citations_removed,
@@ -210,8 +210,8 @@ def answer_from_docs(
     with Span("docs_qa_rewrite", trace_id=trace_id) as s:
         retrieval_query = rewrite_query(user_input, history or [], trace_id=trace_id)
         s.payload = {
-            "original": user_input,
-            "rewritten": retrieval_query,
+            **user_text_fields("original", user_input),
+            **user_text_fields("rewritten", retrieval_query),
             "rewrite_applied": retrieval_query != user_input,
         }
 
@@ -223,7 +223,7 @@ def answer_from_docs(
             return "I don't have any documents to answer from. Try ingesting a file first."
         valid_ids = {c["id"] for c in chunks}
         s.payload = {
-            "query": retrieval_query,
+            **user_text_fields("query", retrieval_query),
             "top_k": top_k,
             "retrieved_ids": list(valid_ids),
         }
@@ -242,7 +242,8 @@ def answer_from_docs(
     # 4a. Streaming path — returns a generator immediately; generation and
     #     guardrail happen lazily as the caller iterates.
     if stream:
-        logger.debug("answer_from_docs: returning streaming generator for query=%r.", user_input)
+        logger.debug("answer_from_docs: returning streaming generator (query %d chars).",
+                     len(user_input))
         return _stream_rag_tokens(messages, valid_ids, user_input, trace_id=trace_id,
                                   model=model)
 
@@ -256,7 +257,7 @@ def answer_from_docs(
         raw_answer = response.choices[0].message.content or ""
         answer = _strip_invalid_citations(raw_answer, valid_ids)
         s.payload = {
-            "query": user_input,
+            **user_text_fields("query", user_input),
             "raw_answer_length": len(raw_answer),
             "citations_removed": raw_answer != answer,
             "streamed": False,

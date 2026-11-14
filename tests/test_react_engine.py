@@ -677,7 +677,15 @@ class TestReactStepLogsToolArgs:
     """The `react_step` event must record WHAT a tool was called with, not just
     which tool ran — otherwise a trajectory cannot tell a wrong argument from a
     bad tool (issue #36). Values are guardrail-scrubbed before they are logged.
+
+    Argument values are user text, so they are logged only with
+    AGENT_LOG_USER_TEXT on; this class tests that shape. The default (off)
+    shape is tested in TestReactStepUserTextOff.
     """
+
+    @pytest.fixture(autouse=True)
+    def _log_user_text_on(self, monkeypatch):
+        monkeypatch.setattr("agentforge.logger.AGENT_LOG_USER_TEXT", True)
 
     def _tool_then_final(self, mock_client, tool_input):
         tool_step = json.dumps({
@@ -797,3 +805,35 @@ class TestReactStepLogsToolArgs:
 
         assert gw.calls == [("get_weather", {"city": "Paris"})]
         assert self._step_payloads(mock_log)[0]["tool_input"] == {"city": "Paris"}
+
+
+class TestReactStepUserTextOff:
+    """With AGENT_LOG_USER_TEXT off (the default), the REACT events keep no user
+    text: the request and the thought become lengths, and the tool arguments
+    become their key names (the audit log's shape)."""
+
+    @patch("agentforge.reasoning.react_engine.log_event")
+    @patch("agentforge.reasoning.react_engine.get_relevant_memories", return_value="")
+    @patch("agentforge.reasoning.react_engine._client")
+    def test_no_user_text_in_react_events(self, mock_client, mock_mem, mock_log):
+        helper = TestReactStepLogsToolArgs()
+        helper._tool_then_final(mock_client, {"city": "Paris"})
+        from agentforge.reasoning.react_engine import react_loop
+        with _patch_gateway(_FakeGateway()):
+            react_loop("u1", "weather in Paris for jane@example.com?",
+                       max_steps=3, trace_id="T1")
+
+        calls = {c.args[0]: c.args[1] for c in mock_log.call_args_list if c.args}
+        start = calls["react_start"]
+        assert "user_input" not in start
+        assert start["user_input_chars"] == len("weather in Paris for jane@example.com?")
+
+        steps = helper._step_payloads(mock_log)
+        assert "thought" not in steps[0]
+        assert steps[0]["thought_chars"] == len("look it up")
+        assert "tool_input" not in steps[0]
+        assert steps[0]["tool_input_keys"] == ["city"]
+        # Nothing the user typed or the tool was given appears anywhere.
+        dumped = json.dumps([c.args[1] for c in mock_log.call_args_list if c.args])
+        assert "jane@example.com" not in dumped
+        assert "Paris" not in dumped

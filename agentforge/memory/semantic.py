@@ -5,7 +5,7 @@ import os
 import numpy as np
 
 from agentforge.config import AGENT_MEMORY_DIR, OPENAI_EMBEDDING_MODEL, OPENAI_BASE_URL
-from agentforge.logger import log_event
+from agentforge.logger import log_event, user_text_fields
 
 _client = None  # created on first API call, not at import time
 
@@ -92,7 +92,7 @@ def store_memory(user_id: str, text: str):
     text = text.strip()
     memory = load_memory(user_id)
     embedding = get_embedding(text)
-    log_event("memory_write", {"text": text})
+    log_event("memory_write", user_text_fields("text", text))
 
     memory.append({
         "text": text,

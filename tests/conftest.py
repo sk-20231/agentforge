@@ -44,6 +44,9 @@ def _redirect_runtime_paths(tmp_path, monkeypatch):
     # Not a path, but read from the same .env: an approval TTL there would make
     # paused-turn tests depend on how long they take. Tests that need one set it.
     monkeypatch.setattr("agentforge.hitl_graph.AGENT_APPROVAL_TTL_SECONDS", 0)
+    # Same reason: AGENT_LOG_USER_TEXT=1 in a developer's .env must not change
+    # what the tests see in the log. Tests of the "on" shape set it themselves.
+    monkeypatch.setattr("agentforge.logger.AGENT_LOG_USER_TEXT", False)
 
 
 @pytest.fixture(autouse=True)

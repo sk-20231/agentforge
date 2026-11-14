@@ -18,7 +18,7 @@ import uuid
 import statistics
 from datetime import datetime, timezone
 
-from agentforge.config import AGENT_LOG_FILE
+from agentforge.config import AGENT_LOG_FILE, AGENT_LOG_USER_TEXT
 
 # The token meter that is active in the current context, if any (Step 21.2).
 # A contextvar, so it follows the code into awaited coroutines and the tasks
@@ -57,6 +57,49 @@ def token_meter():
 def generate_trace_id() -> str:
     """Short unique ID for grouping all events in one run_agent call."""
     return uuid.uuid4().hex[:12]
+
+
+# Per-string cap on user text in the log when AGENT_LOG_USER_TEXT is on. The log
+# is an append-only JSONL file read line by line, so a pasted essay must not
+# become one huge record.
+USER_TEXT_MAX_CHARS = 2000
+
+
+def log_user_text_enabled() -> bool:
+    """True when ``AGENT_LOG_USER_TEXT`` is on. One switch for every module."""
+    return AGENT_LOG_USER_TEXT
+
+
+def user_text_fields(name: str, value) -> dict:
+    """The log fields for one piece of user text: the text, or only its length.
+
+    ``name`` is the field name (``"user_input"``, ``"text"``, ``"query"``...).
+
+    - ``AGENT_LOG_USER_TEXT`` off (the default): ``{"<name>_chars": <length>}``.
+      The text itself never reaches the log.
+    - On: ``{"<name>": <text>}`` after the regex PII scrub, capped at
+      ``USER_TEXT_MAX_CHARS``. Adds ``<name>_redacted`` (PII categories, never
+      values) and ``<name>_truncated`` only when they apply.
+
+    Never raises: a log field must not be able to break a turn. If the scrub
+    fails, it falls back to the length only and flags it.
+    """
+    text = "" if value is None else value if isinstance(value, str) else str(value)
+    if not log_user_text_enabled():
+        return {f"{name}_chars": len(text)}
+    try:
+        # Imported here, not at the top: logger is imported by almost every
+        # module, and the guardrail package should not load with it.
+        from agentforge.output_guardrail import scan_structured
+        scanned = scan_structured(text, max_chars=USER_TEXT_MAX_CHARS)
+    except Exception:
+        return {f"{name}_chars": len(text), f"{name}_scan_failed": True}
+    fields = {name: scanned.value}
+    if scanned.types:
+        fields[f"{name}_redacted"] = scanned.types
+    if scanned.truncated:
+        fields[f"{name}_truncated"] = True
+    return fields
 
 
 def log_event(
@@ -482,7 +525,9 @@ def reconstruct_trajectory(trace_id: str, log_path: str = None) -> dict:
 
     Traces written BEFORE 21b.1 carry no ``tool_input``, so their ``args`` read
     back as ``{}`` — an older log still reconstructs, just without argument
-    detail.
+    detail. The same holds for traces written with ``AGENT_LOG_USER_TEXT`` off
+    (the default): ``task`` reads back as ``""`` and ``args`` as ``{}``, because
+    the log kept only lengths and key names.
     """
     path = log_path or AGENT_LOG_FILE
     task = ""

@@ -90,7 +90,7 @@ def get_weather(city: str) -> str:
     the MCP gateway wraps tool output as untrusted data with the turn's nonce
     (Step 17e). Sanitization of the external display name stays here.
     """
-    logger.info("Weather lookup invoked for city: %s", city)
+    logger.info("Weather lookup invoked (city %d chars)", len(city or ""))
     if not city or not isinstance(city, str):
         raise ValueError("city must be a non-empty string")
 

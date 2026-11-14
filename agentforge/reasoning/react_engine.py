@@ -41,7 +41,9 @@ from agentforge.mcp_client import mcp_gateway
 from agentforge.memory.semantic import get_relevant_memories, store_memory
 from agentforge.output_guardrail import scan_structured
 from agentforge.safety import wrap_untrusted
-from agentforge.logger import log_event, log_token_usage
+from agentforge.logger import (
+    log_event, log_token_usage, log_user_text_enabled, user_text_fields,
+)
 from agentforge.reply import reply_text
 
 _client = None  # created on first API call, not at import time
@@ -221,7 +223,8 @@ def build_react_input(user_id: str, user_input: str, gw, max_steps: int = 5,
     """
     memory_chunks = get_relevant_memories(user_id, user_input)
     earlier = earlier_conversation_message(history)
-    log_event("react_start", {"user_input": user_input, "max_steps": max_steps,
+    log_event("react_start", {**user_text_fields("user_input", user_input),
+                              "max_steps": max_steps,
                               "history_messages": len(history or [])},
               trace_id=trace_id)
     messages = build_prompt(user_input, memory_chunks)
@@ -376,11 +379,17 @@ def _trace_tool_input(tool_input, trace_id: str = None) -> dict:
     Never raises: a trace field must not be able to kill a turn. If the scan
     fails it degrades to the audit log's key-names-only shape and flags itself,
     which is strictly less information but never a wrong value.
+
+    Argument VALUES are user text (a search for "my diagnosis X" carries it),
+    so with ``AGENT_LOG_USER_TEXT`` off (the default) only the key names are
+    logged — the same shape as the audit log.
     """
     if REACT_TRACE_ARG_MAX_CHARS <= 0:  # argument logging switched off
         return {}
 
     args = {} if tool_input is None else tool_input
+    if not log_user_text_enabled():
+        return {"tool_input_keys": sorted(args.keys()) if isinstance(args, dict) else []}
     try:
         scanned = scan_structured(args, max_chars=REACT_TRACE_ARG_MAX_CHARS)
     except Exception as e:
@@ -445,10 +454,13 @@ async def _think_node(state: _ReactState) -> dict:
     thought = data.get("thought", "")
     action = data.get("action", {})
 
-    print(f"\n[THOUGHT {step+1}] {thought}")
+    # Console output becomes the container log once deployed, and the thought
+    # often repeats the user's words — so it follows AGENT_LOG_USER_TEXT too.
+    if log_user_text_enabled():
+        print(f"\n[THOUGHT {step+1}] {thought}")
     step_payload = {
         "step": step + 1,
-        "thought": thought,
+        **user_text_fields("thought", thought),
         "action_type": action.get("type"),
         "tool_name": action.get("tool_name"),
     }

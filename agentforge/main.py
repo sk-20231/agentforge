@@ -33,7 +33,10 @@ from agentforge.memory.semantic import (
 )
 from agentforge.memory.response import answer_with_memory
 from agentforge.rag.qa import answer_from_docs
-from agentforge.logger import log_event, generate_trace_id, Span, log_token_usage
+from agentforge.logger import (
+    log_event, generate_trace_id, Span, log_token_usage, log_user_text_enabled,
+    user_text_fields,
+)
 from agentforge.reasoning.react_engine import (
     pending_react_approval,
     react_loop,
@@ -231,7 +234,8 @@ def run_agent(
     # DOCS_QA, etc.) automatically receives a history that fits the budget.
     # The caller's original list is NOT mutated; trim_history returns a new list.
     tid = trace_id or generate_trace_id()
-    log_event("trace_start", {"user_input": user_input, "user_id": user_id}, trace_id=tid)
+    log_event("trace_start", {**user_text_fields("user_input", user_input),
+                              "user_id": user_id}, trace_id=tid)
 
     # INPUT guardrail (issue #22): scan the user's message for prompt-injection /
     # jailbreak BEFORE any classification or routing. A flagged message short-circuits
@@ -268,10 +272,12 @@ def run_agent(
     try:
         with Span("intent_classification", trace_id=tid) as span:
             intent_data = classify_intent(user_input, trace_id=tid)
+            # memory_candidate is the fact to store and reason can repeat the
+            # user's words — both are user text (AGENT_LOG_USER_TEXT).
             span.payload = {
                 "intent": intent_data["intent"],
-                "memory_candidate": intent_data["memory_candidate"],
-                "reason": intent_data["reason"],
+                **user_text_fields("memory_candidate", intent_data["memory_candidate"]),
+                **user_text_fields("reason", intent_data["reason"]),
             }
     except Exception:
         return "Something went wrong while understanding your request. Please try again."
@@ -280,7 +286,9 @@ def run_agent(
     memory_candidate = intent_data["memory_candidate"]
     reason = intent_data["reason"]
 
-    print(f"\n[Intent] {intent} — {reason}")
+    # The classifier's reason can repeat the user's words, and console output
+    # becomes the container log once deployed (AGENT_LOG_USER_TEXT).
+    print(f"\n[Intent] {intent}" + (f" — {reason}" if log_user_text_enabled() else ""))
 
     route = _route_turn(intent, intent_data.get("low_confidence", False), tid)
     return _run_pipeline(intent, memory_candidate, route, user_id, user_input,
@@ -720,11 +728,11 @@ if __name__ == "__main__":
             break
 
         try:
-            log_event("user_input", {"text": user_input})
+            log_event("user_input", user_text_fields("text", user_input))
             result = run_agent(user_id, session_id, user_input, history=history, stream=True)
 
             if isinstance(result, str):
-                log_event("final_answer", {"text": result, "streamed": False})
+                log_event("final_answer", {**user_text_fields("text", result), "streamed": False})
                 print("Agent:", result)
             else:
                 print("Agent: ", end="", flush=True)
@@ -734,7 +742,7 @@ if __name__ == "__main__":
                     full_text += token
                 print()
                 result = full_text
-                log_event("final_answer", {"text": result, "streamed": True})
+                log_event("final_answer", {**user_text_fields("text", result), "streamed": True})
 
             history.append({"role": "user", "content": user_input})
             history.append({"role": "assistant", "content": result})

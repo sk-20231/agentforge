@@ -49,7 +49,7 @@ def _best_match(query: str) -> Optional[str]:
     try:
         data = _get_json(url)
     except (urllib.error.URLError, ValueError) as e:  # HTTPError is a URLError
-        logger.warning("Wikipedia search failed for %r: %s", query, e)
+        logger.warning("Wikipedia search failed (query %d chars): %s", len(query), e)
         return None
     pages = data.get("pages") if isinstance(data, dict) else None
     if not isinstance(pages, list) or not pages or not isinstance(pages[0], dict):
@@ -74,7 +74,7 @@ def wikipedia_lookup(topic: str) -> str:
     nonce (Step 17e). Sanitization stays here as defence-in-depth on the
     machine-level tricks (control/HTML/zero-width chars).
     """
-    logger.info("Wikipedia lookup invoked for topic: %s", topic)
+    logger.info("Wikipedia lookup invoked (topic %d chars)", len(topic or ""))
     if not topic or not isinstance(topic, str) or not topic.strip():
         raise ValueError("topic must be a non-empty string")
     topic = topic.strip()
@@ -84,7 +84,7 @@ def wikipedia_lookup(topic: str) -> str:
         match = _best_match(topic)
         if match is None:
             raise ValueError(f"No Wikipedia article found for '{topic}'")
-        logger.info("Wikipedia: no page titled %r, using top search hit %r", topic, match)
+        logger.info("Wikipedia: no exact page title, using the top search hit")
         data = _summary(match)
         if data is None:
             raise ValueError(f"No Wikipedia article found for '{topic}'")

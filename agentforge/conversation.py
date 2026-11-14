@@ -327,10 +327,11 @@ Standalone question:"""
             logger.warning("rewrite_query: LLM returned empty rewrite, using original.")
             return user_input
 
+        # Lengths only: both strings are user text (AGENT_LOG_USER_TEXT).
         logger.info(
-            "rewrite_query: original=%r  rewritten=%r",
-            user_input,
-            rewritten,
+            "rewrite_query: rewritten (original %d chars, rewritten %d chars)",
+            len(user_input),
+            len(rewritten),
         )
         return rewritten
 

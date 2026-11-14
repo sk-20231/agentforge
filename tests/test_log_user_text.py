@@ -115,6 +115,21 @@ class TestNoUserTextInTheLog:
         assert "asthma" not in _log_text()
 
 
+@patch("agentforge.conversation._client")
+def test_rewrite_query_console_log_has_lengths_only(mock_client, caplog):
+    """Found by CodeQL on PR #92: the rewrite logged both strings at INFO."""
+    import logging
+    from agentforge.conversation import rewrite_query
+    mock_client.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(content=f"leave policy for {SECRET}"))])
+    with caplog.at_level(logging.DEBUG):
+        rewrite_query(USER_TEXT, [{"role": "user", "content": "earlier"},
+                                  {"role": "assistant", "content": "reply"}])
+    assert "rewrite_query: rewritten" in caplog.text
+    assert SECRET not in caplog.text
+    assert "asthma" not in caplog.text
+
+
 # ---------- --from-trace asks for the task when the log did not keep it ----------
 
 def test_review_asks_for_the_task_when_the_trace_has_none():

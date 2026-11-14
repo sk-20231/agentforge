@@ -228,3 +228,110 @@ class TestAnswerFromDocsWithHistory:
         assert len(messages) == 2  # system (RAG prompt) + user
         assert messages[0]["role"] == "system"
         assert messages[-1]["role"] == "user"
+
+
+# ---------- streamed replies: the citation guardrail runs BEFORE text is shown (#79) ----------
+
+from agentforge.rag.qa import (  # noqa: E402
+    CITATION_HOLD_MAX_CHARS, _filter_citations, _normalize_spacing)
+
+_VALID = {"Chunk_1", "doc_0", "["}
+
+_REPLIES = [
+    "Leave is 20 days [Chunk_1] and [Chunk_99].",       # the reproduction in #79
+    "See [Chunk_99] for details [doc_0].",               # removal between two spaces
+    "[Chunk_99] starts the reply.",                      # citation at the very start
+    "Ends with a citation [Chunk_99]",                   # ... and at the very end
+    "Ends with a valid one [Chunk_1]",
+    "Empty [] brackets stay, [Chunk_1] too.",
+    "Nested [[Chunk_1] and [[x] and [a [b] c.",
+    "A lone [ with no closing bracket at all.",
+    "Two  spaces,   many spaces, and\nnew lines  [Chunk_99]  here.",
+    "  \n Leading and trailing whitespace [Chunk_99] \n ",
+    "Back to back [Chunk_1][Chunk_99][doc_0].",
+    "Close then open ][ and [Chunk_99",
+    "",
+    "   ",
+    "No citations at all.",
+]
+
+
+def _pieces(text, size):
+    return [text[i:i + size] for i in range(0, len(text), size)]
+
+
+def _streamed(text, size, valid=_VALID):
+    return "".join(_normalize_spacing(_filter_citations(_pieces(text, size), valid)))
+
+
+class TestStreamedCitationGuard:
+
+    @pytest.mark.parametrize("size", [1, 3, 7, 1000])
+    @pytest.mark.parametrize("reply", _REPLIES)
+    def test_stream_equals_the_non_streamed_answer(self, reply, size):
+        assert _streamed(reply, size) == _strip_invalid_citations(reply, _VALID)
+
+    def test_random_replies_match_at_every_token_size(self):
+        import random
+        rng = random.Random(79)
+        alphabet = ["a", "b", " ", " ", "\n", "[", "]", "Chunk_1", "doc_0", "x"]
+        for _ in range(500):
+            reply = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 40)))
+            for size in (1, 2, 3, 5, 1000):
+                assert _streamed(reply, size) == _strip_invalid_citations(reply, _VALID), \
+                    (reply, size)
+
+    def test_text_without_brackets_is_not_held_back(self):
+        out = list(_filter_citations(["Hello ", "world"], set()))
+        assert out == ["Hello ", "world"]
+
+    def test_a_lone_bracket_does_not_hold_back_the_rest_of_the_reply(self):
+        consumed = []
+
+        def pieces():
+            for i, ch in enumerate("Start [" + "x" * 1000):
+                consumed.append(i)
+                yield ch
+
+        stream = _filter_citations(pieces(), set())
+        next(stream)                           # "S"
+        first_held = None
+        for out in stream:
+            if "[" in out:
+                first_held = len(consumed)
+                break
+        # The "[" text is released once the hold limit is passed, not at the end.
+        assert first_held is not None
+        assert first_held <= len("Start [") + CITATION_HOLD_MAX_CHARS + 1
+
+
+class TestStreamedAnswerFromDocs:
+
+    @staticmethod
+    def _stream(mock_client, tokens):
+        chunks = []
+        for t in tokens:
+            c = MagicMock(usage=None)
+            c.choices = [MagicMock(delta=MagicMock(content=t))]
+            chunks.append(c)
+        mock_client.chat.completions.create.return_value = iter(chunks)
+
+    @pytest.mark.parametrize("size", [1, 3, 7, 1000])
+    @patch("agentforge.rag.qa.log_event")
+    @patch("agentforge.rag.qa._client")
+    @patch("agentforge.rag.qa.search_docs")
+    def test_invented_citation_is_never_shown(self, mock_search, mock_client, mock_log, size):
+        mock_search.return_value = [
+            {"id": "Chunk_1", "text": "Leave policy.", "source": "doc.txt", "score": 0.9}]
+        raw = "Leave is 20 days [Chunk_1] and [Chunk_99]."
+        self._stream(mock_client, _pieces(raw, size))
+
+        pieces = list(answer_from_docs("How much leave?", stream=True))
+
+        assert all("Chunk_99" not in p for p in pieces)
+        assert "".join(pieces) == "Leave is 20 days [Chunk_1] and ."
+        (answer,) = [c.args[1] for c in mock_log.call_args_list
+                     if c.args[0] == "docs_qa_answer"]
+        assert answer["citations_removed"] is True
+        assert answer["stream_matches_clean"] is True
+        assert answer["raw_answer_length"] == len(raw)

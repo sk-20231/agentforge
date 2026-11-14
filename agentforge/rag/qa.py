@@ -92,8 +92,84 @@ def _strip_invalid_citations(answer: str, valid_ids: set[str]) -> str:
 
     cleaned = re.sub(r"\[([^\]]+)\]", replacer, answer)
     # Clean up any double spaces left after removal
-    cleaned = re.sub(r"  +", " ", cleaned).strip()
+    cleaned = _MULTI_SPACE.sub(" ", cleaned).strip()
     return cleaned
+
+
+_MULTI_SPACE = re.compile(r"  +")
+
+# Longest text held back after an unclosed "[" while the stream waits for its "]".
+# Past this, the held text is shown unchanged, so a lone "[" in normal prose can
+# never hold back the rest of the reply. A citation id is far shorter than this.
+CITATION_HOLD_MAX_CHARS = 200
+
+
+def _filter_citations(pieces, valid_ids: set[str],
+                      max_hold: int = CITATION_HOLD_MAX_CHARS) -> Iterator[str]:
+    """The streamed form of the citation rule in ``_strip_invalid_citations`` (#79).
+
+    Text with no "[" passes through at once. From a "[" on, text is held back until
+    its "]" arrives; then that one citation is kept (valid id) or removed. The rule
+    is the same as the pattern ``\\[([^\\]]+)\\]``: a "[" runs to the FIRST "]" after
+    it, "[]" is not a citation, and a "[" with no "]" later is plain text.
+
+    The joined output equals the non-streamed result, except in one case: a "["
+    held for more than ``max_hold`` characters is shown unchanged, so a "]" that
+    arrives after that does not remove it.
+    """
+    held = ""  # text from an unclosed "[" on
+    for piece in pieces:
+        text, held = held + piece, ""
+        out = []
+        i = 0
+        while True:
+            start = text.find("[", i)
+            if start == -1:
+                out.append(text[i:])
+                break
+            out.append(text[i:start])
+            end = text.find("]", start + 1)
+            if end == -1:
+                held = text[start:]
+                break
+            if end == start + 1:
+                out.append("[]")  # empty brackets: not a citation, kept as text
+            elif text[start + 1:end] in valid_ids:
+                out.append(text[start:end + 1])
+            i = end + 1
+        if len(held) > max_hold:
+            logger.debug("_filter_citations: no ']' within %d chars; showing the held "
+                         "text unchanged.", max_hold)
+            out.append(held)
+            held = ""
+        joined = "".join(out)
+        if joined:
+            yield joined
+    if held:
+        yield held  # a "[" never closed: plain text, the same as the non-streamed rule
+
+
+def _normalize_spacing(pieces) -> Iterator[str]:
+    """The streamed form of the spacing rule in ``_strip_invalid_citations``:
+    runs of spaces become one space, and whitespace at the start and end is dropped.
+
+    Whitespace at the end of each piece is held back until the next non-space
+    text arrives, so a run of spaces split across pieces (for example around a
+    removed citation) is still collapsed, and trailing whitespace is never shown.
+    """
+    started = False
+    pending = ""
+    for piece in pieces:
+        text = pending + piece
+        if not started:
+            text = text.lstrip()
+            if not text:
+                continue
+            started = True
+        body = text.rstrip()
+        pending = text[len(body):]
+        if body:
+            yield _MULTI_SPACE.sub(" ", body)
 
 
 # ---------- Streaming generator ----------
@@ -105,17 +181,19 @@ def _stream_rag_tokens(
     trace_id: str = None,
     model: str = None,
 ) -> Iterator[str]:
-    """Stream RAG generation tokens while buffering for the citation guardrail.
+    """Stream RAG generation tokens with the citation guardrail applied as they pass.
 
-    This is the "stream and collect" pattern:
-      - Each token is yielded immediately so the caller (CLI or UI) can print it.
-      - Every token is also appended to full_text so the guardrail has the
-        complete response after the loop ends.
-      - After streaming finishes, the guardrail runs on the full buffer.
-        If any invalid citation was removed, the corrected version is compared
-        and a log entry records what changed. The caller already received the
-        raw tokens — we log the diff for observability but don't send a
-        correction back (the next turn will use the clean version in history).
+    The guardrail runs on the stream itself, BEFORE text reaches the caller (#79):
+      - Text with no "[" is yielded at once.
+      - From a "[" on, text is held back until its "]" arrives; an invented
+        citation is removed and never shown (``_filter_citations``).
+      - Spacing is cleaned the same way as the non-streamed path
+        (``_normalize_spacing``).
+    So what the user sees, and what the UI stores in the chat history, equals
+    the non-streamed answer. Before #79 every raw token was shown and the
+    cleaned text was only compared after the stream ended, then discarded.
+
+    The raw text is still collected, only to log whether citations were removed.
 
     Why separate from answer_from_docs:
       Same reason as _stream_tokens in memory/response.py — keeping the
@@ -128,37 +206,52 @@ def _stream_rag_tokens(
         stream_options={"include_usage": True},
     )
 
-    full_text = ""
-    token_count = 0
-    for chunk in response:
-        if chunk.usage:
-            log_token_usage(chunk, "docs_qa_generate_stream", trace_id=trace_id)
-        if not chunk.choices:
-            continue
-        token = chunk.choices[0].delta.content
-        if token:
-            full_text += token
-            token_count += 1
-            yield token
+    raw_parts = []
 
-    # Guardrail runs on the complete buffered response after streaming ends.
+    def _raw_tokens():
+        for chunk in response:
+            if chunk.usage:
+                log_token_usage(chunk, "docs_qa_generate_stream", trace_id=trace_id)
+            if not chunk.choices:
+                continue
+            token = chunk.choices[0].delta.content
+            if token:
+                raw_parts.append(token)
+                yield token
+
+    shown_parts = []
+    for piece in _normalize_spacing(_filter_citations(_raw_tokens(), valid_ids)):
+        shown_parts.append(piece)
+        yield piece
+
+    full_text = "".join(raw_parts)
+    shown_text = "".join(shown_parts)
     clean_answer = _strip_invalid_citations(full_text, valid_ids)
     citations_removed = full_text != clean_answer
+    matches_clean = shown_text == clean_answer
 
     log_event("docs_qa_answer", {
         **user_text_fields("query", user_input),
         "raw_answer_length": len(full_text),
-        "token_count": token_count,
+        "shown_answer_length": len(shown_text),
+        "token_count": len(raw_parts),
         "citations_removed": citations_removed,
         "streamed": True,
+        "stream_matches_clean": matches_clean,
     }, trace_id=trace_id)
 
     if citations_removed:
         logger.warning(
-            "_stream_rag_tokens: invalid citations stripped from streamed response. "
-            "Raw length=%d, clean length=%d.",
-            len(full_text),
-            len(clean_answer),
+            "_stream_rag_tokens: invalid citations removed from the stream before "
+            "they were shown. Raw length=%d, shown length=%d.",
+            len(full_text), len(shown_text),
+        )
+    if not matches_clean:
+        # Only the hold limit (CITATION_HOLD_MAX_CHARS) can cause this.
+        logger.warning(
+            "_stream_rag_tokens: streamed text differs from the non-streamed rule "
+            "(a '[' was held past %d chars). Shown length=%d, clean length=%d.",
+            CITATION_HOLD_MAX_CHARS, len(shown_text), len(clean_answer),
         )
 
     log_event("trace_end", {"intent": "DOCS_QA", "streamed": True}, trace_id=trace_id)
@@ -198,9 +291,10 @@ def answer_from_docs(
         user_input: The user's question (may contain pronouns or references).
         top_k:      Number of chunks to retrieve.
         history:    Optional conversation history (list of role/content dicts).
-        stream:     If True, returns an Iterator[str] that yields tokens as they
-                    arrive. The citation guardrail runs after the last token is
-                    buffered internally. If False (default), returns a full str.
+        stream:     If True, returns an Iterator[str] that yields text as it
+                    arrives, with the citation guardrail applied on the way
+                    (only text after an unclosed "[" is held back until its "]").
+                    If False (default), returns a full str.
 
     Returns:
         The LLM's answer with only valid citations (str), or an Iterator[str]

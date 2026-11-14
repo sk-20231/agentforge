@@ -1124,6 +1124,11 @@ if __name__ == "__main__":
         print(f"Appended {reviewed['id']} to the trajectory eval dataset.")
         sys.exit(0)
 
+    # --- Issue #88: live Deny-honesty eval, a self-contained mode (no corpus) ---
+    if "--deny-honesty" in sys.argv:
+        from agentforge.deny_eval import main as deny_honesty_main
+        sys.exit(deny_honesty_main(sys.argv))
+
     # --- Step 21.2: planner eval is a self-contained mode (no corpus needed) ---
     if "--planner" in sys.argv:
         runs = 1

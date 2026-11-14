@@ -52,7 +52,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional, Tuple
 
-from agentforge.config import AGENT_GUARDRAIL_MODEL_ID, AGENT_GUARDRAIL_THRESHOLD
+from agentforge.config import (
+    AGENT_GUARDRAIL_MODEL_ID,
+    AGENT_GUARDRAIL_MODEL_REVISION,
+    AGENT_GUARDRAIL_THRESHOLD,
+)
+from agentforge.hf_local import load_local_first
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +107,15 @@ def _build_scanner() -> _Scanner:
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
     model_id = AGENT_GUARDRAIL_MODEL_ID
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModelForSequenceClassification.from_pretrained(model_id)
+
+    def _load(local_files_only: bool):
+        # Issue #60: from the local cache first, with no request to the Hub.
+        kw = {"revision": AGENT_GUARDRAIL_MODEL_REVISION,
+              "local_files_only": local_files_only}
+        return (AutoTokenizer.from_pretrained(model_id, **kw),
+                AutoModelForSequenceClassification.from_pretrained(model_id, **kw))
+
+    tokenizer, model = load_local_first(_load, model_id)
     model.eval()
 
     # Resolve the label scheme ONCE so scanning is model-agnostic. Binary injection

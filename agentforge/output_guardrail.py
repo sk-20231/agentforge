@@ -58,6 +58,7 @@ from agentforge.config import (
     AGENT_OUTPUT_GUARDRAIL_AGGRESSIVE,
     AGENT_OUTPUT_GUARDRAIL_ENGINE,
     AGENT_OUTPUT_GUARDRAIL_MODEL_ID,
+    AGENT_OUTPUT_GUARDRAIL_MODEL_REVISION,
     AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS,
     AGENT_OUTPUT_GUARDRAIL_THRESHOLD,
 )
@@ -185,12 +186,19 @@ def _build_presidio():
     # GLiNER for PERSON/ADDRESS (opt-in), then drop spaCy's own NER so it doesn't
     # also emit (weaker) PERSON/LOCATION detections competing with GLiNER.
     if AGENT_OUTPUT_GUARDRAIL_PERSON_ADDRESS:
-        gliner = GLiNERRecognizer(
+        from agentforge.hf_local import load_local_first
+
+        # Issue #60: the constructor loads the model; from the local cache
+        # first, with no request to the Hub. Extra keywords reach
+        # GLiNER.from_pretrained.
+        gliner = load_local_first(lambda local_files_only: GLiNERRecognizer(
             model_name=AGENT_OUTPUT_GUARDRAIL_MODEL_ID,
             entity_mapping=_GLINER_LABEL_MAP,
             flat_ner=False, multi_label=True,
             threshold=AGENT_OUTPUT_GUARDRAIL_THRESHOLD, map_location="cpu",
-        )
+            revision=AGENT_OUTPUT_GUARDRAIL_MODEL_REVISION,
+            local_files_only=local_files_only,
+        ), AGENT_OUTPUT_GUARDRAIL_MODEL_ID)
         analyzer.registry.add_recognizer(gliner)
     else:
         logger.info("output guardrail: PERSON/ADDRESS redaction off; GLiNER not loaded")

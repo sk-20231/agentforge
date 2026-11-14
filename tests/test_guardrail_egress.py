@@ -37,6 +37,17 @@ def test_guardrail_imports_no_remote_llm_client():
     )
 
 
+def test_hf_local_loader_imports_no_network_client():
+    # Issue #60: the shared loader both guardrails use. It only reads the local
+    # cache; the fallback is from_pretrained's own download. No client of its own.
+    import agentforge.hf_local as hf_local_module
+    src = pathlib.Path(hf_local_module.__file__).read_text(encoding="utf-8")
+    imported = {m.split(".")[0] for m in
+                re.findall(r"^\s*(?:from|import)\s+([a-zA-Z0-9_\.]+)", src, re.M)}
+    leaked = _FORBIDDEN_IMPORTS & imported
+    assert not leaked, f"hf_local.py must not import a network client — found {leaked}"
+
+
 def test_guardrail_loads_the_local_transformers_model():
     # The local inference path must be present (not a remote API call).
     assert "AutoModelForSequenceClassification" in _SRC

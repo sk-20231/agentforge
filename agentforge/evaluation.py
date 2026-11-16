@@ -229,16 +229,26 @@ def score_faithfulness(
     question: str,
     answer: str,
     chunks: list[dict],
+    model: str = None,
+    temperature: float = None,
 ) -> dict:
     """Use an LLM to judge whether the answer is faithful to the chunks.
 
-    Returns {"faithful": bool, "reason": str}.
-    Falls back to {"faithful": False, "reason": "..."} on any error.
+    ``model`` and ``temperature`` pin the judge for a measured run (issue #95);
+    left unset, the judge runs as before: on ``OPENAI_MODEL`` with the API's
+    default sampling.
+
+    Returns {"faithful": bool, "reason": str, "error": str | None}.
+    On a judge failure (API error, reply that is not the expected JSON) the
+    verdict falls back to ``faithful: False`` as before, and ``error`` says
+    what failed — so a caller can tell "the answer is unfaithful" from "the
+    judge failed".
     """
     from openai import OpenAI
     from agentforge.config import OPENAI_MODEL, OPENAI_BASE_URL
 
     _client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+    sampling = {} if temperature is None else {"temperature": temperature}
 
     chunks_text = "\n\n---\n\n".join(
         f"[{c['id']}] {c['text']}" for c in chunks
@@ -252,21 +262,37 @@ def score_faithfulness(
 
     try:
         response = _client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model or OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": FAITHFULNESS_JUDGE_PROMPT},
                 {"role": "user", "content": user_message},
             ],
             response_format={"type": "json_object"},
+            **sampling,
         )
         data = json.loads(response.choices[0].message.content)
+        # A reply without a true/false "faithful" field is a judge failure, not
+        # an "unfaithful" verdict: bool("false") would be True, and a missing
+        # field would silently count against the answer.
+        if not isinstance(data, dict) or not isinstance(data.get("faithful"), bool):
+            logger.error("score_faithfulness: judge reply has no boolean 'faithful' field")
+            return {
+                "faithful": False,
+                "reason": "Judge error: reply has no boolean 'faithful' field",
+                "error": "bad_verdict",
+            }
         return {
-            "faithful": bool(data.get("faithful", False)),
-            "reason": data.get("reason", ""),
+            "faithful": data["faithful"],
+            "reason": str(data.get("reason", "")),
+            "error": None,
         }
     except Exception as exc:
-        logger.error("score_faithfulness failed: %s", exc)
-        return {"faithful": False, "reason": f"Judge error: {exc}"}
+        logger.error("score_faithfulness failed: %s", type(exc).__name__)
+        return {
+            "faithful": False,
+            "reason": f"Judge error: {exc}",
+            "error": type(exc).__name__,
+        }
 
 
 def run_faithfulness_eval(
@@ -1139,6 +1165,12 @@ if __name__ == "__main__":
     if "--deny-honesty" in sys.argv:
         from agentforge.deny_eval import main as deny_honesty_main
         sys.exit(deny_honesty_main(sys.argv))
+
+    # --- Issue #95: check the faithfulness judge against human labels. Both
+    #     commands read the frozen gold set, so no corpus is needed. ---
+    if "--judge-agreement" in sys.argv or "--label-gold" in sys.argv:
+        from agentforge.judge_eval import main as judge_eval_main
+        sys.exit(judge_eval_main(sys.argv))
 
     # --- Step 21.2: planner eval is a self-contained mode (no corpus needed) ---
     if "--planner" in sys.argv:

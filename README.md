@@ -138,6 +138,7 @@ flowchart TD
 | **Structured outputs** | [`prompts.py — OUTPUT_SCHEMA`](agentforge/prompts.py) | `response_format={"type": "json_object"}` for reliable parsing |
 | **Evaluation — Recall@K** | [`evaluation.py`](agentforge/evaluation.py) | Measure retrieval quality objectively |
 | **Evaluation — Faithfulness (LLM-as-judge)** | [`evaluation.py`](agentforge/evaluation.py) | Is the answer actually supported by the retrieved chunks? |
+| **Evaluation — checking the judge** | [`judge_eval.py`](agentforge/judge_eval.py) | Can the faithfulness judge itself be trusted? Cohen's kappa against a labelled gold set |
 | **CI/CD eval gating** | [`.github/workflows/eval.yml`](.github/workflows/eval.yml) | Fail the build if Recall@K < 70% or faithfulness < 80% |
 | **Trace logging** | [`logger.py — Span`](agentforge/logger.py) | Every run has a trace_id, per-span latency, JSONL events |
 | **Cost tracking** | [`logger.py — log_token_usage`](agentforge/logger.py) | Per-operation USD cost, visible in the Streamlit sidebar |
@@ -305,6 +306,7 @@ agentforge/
 │   │   ├── weather.py            # Open-meteo (geocode + forecast, 2-call chain)
 │   │   └── news.py               # HackerNews Algolia search
 │   ├── evaluation.py             # Recall@K + faithfulness + trajectory scoring
+│   ├── judge_eval.py             # Checks the faithfulness judge against a labelled gold set (Cohen's kappa)
 │   ├── memory/                   # Semantic memory sub-package
 │   │   ├── semantic.py           # Embeddings, similarity, memory store/retrieve
 │   │   └── response.py           # Memory-aware answer generation
@@ -389,6 +391,12 @@ pytest tests/ -v
 python -m agentforge.evaluation --eval --faithfulness
 ```
 
+**Check the faithfulness judge itself** (live, about one cent):
+```bash
+python -m agentforge.evaluation --judge-agreement --split=test   # judge vs. the gold set
+python -m agentforge.evaluation --label-gold --relabel           # label the gold set yourself
+```
+
 ---
 
 ## Configuration
@@ -448,6 +456,27 @@ Every message is classified into one of these intents. With the supervisor on ([
 
 - **[`ci.yml`](.github/workflows/ci.yml)** — runs the unit-test suite (count in the badge above; a handful of optional PII / live-model / network-contract tests skip without their extra deps) on every push and PR. Free. No API key required.
 - **[`eval.yml`](.github/workflows/eval.yml)** — runs the full eval suite (Recall@K + faithfulness) on push to `main`. Uses a pre-built test corpus fixture so Recall@K costs nothing; only faithfulness scoring calls the API. It runs after the merge, so it does not block one: if Recall@K < 70% or faithfulness < 80%, the run fails and flags that a merged change lowered quality.
+
+---
+### How far the faithfulness judge can be trusted
+
+The faithfulness score comes from an LLM judge, so the judge is measured too. [`tests/judge_gold_dataset.json`](tests/judge_gold_dataset.json) holds 60 cases with the question, the chunks and the answer frozen: 30 real pipeline answers and 30 answers written to be hard (a changed number, an added fact, outside knowledge, a swapped detail, an unsupported conclusion, a heavy paraphrase, a refusal). The set has two fixed halves, split by question: one for changing the judge prompt, one for reporting.
+
+**The reference labels are not human labels yet.** An AI assistant gave them (`labelled_by: "ai"`); for the written cases the label is the error that was planted on purpose. So the numbers below show how well the judge finds known errors. They do not show agreement with people. `--label-gold` replaces the labels with human ones, and the report prints who labelled.
+
+Reporting half, 32 cases × 3 runs, `gpt-4o-mini` at temperature 0, judge prompt never tuned on either half:
+
+| | Judge: faithful | Judge: unfaithful | Judge failed |
+|---|---|---|---|
+| **Reference: faithful (22)** | 22 | 0 | 0 |
+| **Reference: unfaithful (10)** | 2 | 8 | 0 |
+
+- **Cohen's kappa 0.85** (95% bootstrap interval 0.60 to 1.00; the interval is wide because the set is small). Raw agreement 94%. Target: kappa ≥ 0.6.
+- **Unfaithful answers the judge passed: 2 of 10 (20%).** Faithful answers it flagged: 0 of 22.
+- Every case got the same verdict in all 3 runs.
+- The other half gives the same picture: kappa 0.77, 3 of 12 unfaithful answers passed, 0 of 16 faithful answers flagged.
+
+**What the misses have in common:** all 5 are a few unsupported words inside an otherwise correct answer (a state name the chunks never give, "must sign in at reception", a conclusion introduced with "so"). The judge caught every changed number. Its mistakes all go one way, so the faithfulness score in CI can be too high and is not too low.
 
 ---
 

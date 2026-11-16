@@ -212,6 +212,7 @@ class TestScoreFaithfulness:
         result = score_faithfulness("Q", "A", self.CHUNKS)
         assert result["faithful"] is False
         assert "Judge error" in result["reason"]
+        assert result["error"] == "Exception"
 
     @patch("openai.OpenAI")
     def test_handles_malformed_json_gracefully(self, mock_openai_cls):
@@ -224,3 +225,50 @@ class TestScoreFaithfulness:
         result = score_faithfulness("Q", "A", self.CHUNKS)
         assert result["faithful"] is False
         assert "Judge error" in result["reason"]
+        assert result["error"] == "JSONDecodeError"
+
+    # ---- issue #95: a pinned judge, and a failure that is visible ----
+
+    def _reply(self, mock_openai_cls, content):
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content=content))
+        ]
+        return mock_client.chat.completions.create
+
+    @patch("openai.OpenAI")
+    def test_a_real_verdict_has_no_error(self, mock_openai_cls):
+        self._reply(mock_openai_cls, '{"faithful": false, "reason": "Invented a fact."}')
+        result = score_faithfulness("Q", "A", self.CHUNKS)
+        assert result == {"faithful": False, "reason": "Invented a fact.", "error": None}
+
+    @patch("openai.OpenAI")
+    def test_default_call_sends_no_temperature_and_the_configured_model(self, mock_openai_cls):
+        from agentforge.config import OPENAI_MODEL
+        create = self._reply(mock_openai_cls, '{"faithful": true, "reason": "ok"}')
+        score_faithfulness("Q", "A", self.CHUNKS)
+        kwargs = create.call_args.kwargs
+        assert "temperature" not in kwargs
+        assert kwargs["model"] == OPENAI_MODEL
+
+    @patch("openai.OpenAI")
+    def test_model_and_temperature_are_passed_to_the_judge(self, mock_openai_cls):
+        create = self._reply(mock_openai_cls, '{"faithful": true, "reason": "ok"}')
+        score_faithfulness("Q", "A", self.CHUNKS, model="judge-model", temperature=0)
+        kwargs = create.call_args.kwargs
+        assert kwargs["model"] == "judge-model"
+        assert kwargs["temperature"] == 0
+
+    @pytest.mark.parametrize("content", [
+        '{"reason": "no verdict field"}',
+        '{"faithful": "false", "reason": "a string, not a boolean"}',
+        '{"faithful": null, "reason": "null"}',
+        '["faithful"]',
+    ])
+    @patch("openai.OpenAI")
+    def test_a_reply_without_a_boolean_verdict_is_a_judge_failure(self, mock_openai_cls, content):
+        self._reply(mock_openai_cls, content)
+        result = score_faithfulness("Q", "A", self.CHUNKS)
+        assert result["faithful"] is False
+        assert result["error"] == "bad_verdict"
